@@ -1,0 +1,113 @@
+name: Build KP Kids Edited Short
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_b64:
+        description: Base64 encoded short-edit job
+        required: true
+        type: string
+      callback_url:
+        description: n8n production callback URL
+        required: true
+        type: string
+      callback_token:
+        description: Shared callback token
+        required: true
+        type: string
+
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Render edited Short
+        run: |
+          python3 short_editor.py \
+            --payload-b64 '${{ inputs.payload_b64 }}' \
+            --output kp_kids_edited_short.mp4
+
+      - name: Upload final MP4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-kids-edited-short
+          path: |
+            kp_kids_edited_short.mp4
+            edit_result.json
+          retention-days: 3
+
+      - name: Send success callback
+        if: success()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_REPO: ${{ github.repository }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          body = {
+              "status": "success",
+              "github_run_id": os.environ["GH_RUN_ID"],
+              "github_repository": os.environ["GH_REPO"],
+              "artifact_name": "kp-kids-edited-short",
+              **payload,
+          }
+          req = urllib.request.Request(
+              os.environ["CALLBACK_URL"],
+              data=json.dumps(body).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"],
+              },
+              method="POST",
+          )
+          urllib.request.urlopen(req, timeout=60).read()
+          PY
+
+      - name: Send failure callback
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_REPO: ${{ github.repository }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          try:
+              payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          except Exception:
+              payload = {}
+          body = {
+              "status": "failed",
+              "github_run_id": os.environ["GH_RUN_ID"],
+              "github_repository": os.environ["GH_REPO"],
+              "message": "GitHub short editor failed",
+              **payload,
+          }
+          req = urllib.request.Request(
+              os.environ["CALLBACK_URL"],
+              data=json.dumps(body).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"],
+              },
+              method="POST",
+          )
+          urllib.request.urlopen(req, timeout=60).read()
+          PY
