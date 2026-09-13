@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-INTRO_DRIVE_FILE_ID = "1XYCM2RNf2GKD6drSPCwi6rDKWsK_QZpy"
+INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
