@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V5.2: Smart Kids Edit + robust Google Drive intro download
+# KP Kids Short Editor V5.4: Smart Kids Edit + Google Drive Intro + Closure
 # V5.2 polish pass: smooth alpha fades on all on-screen text (no more hard pop
 # in/out), a real crossfade between the intro and the Short instead of a hard
 # cut, the topic line now actually renders (was computed but never drawn),
 # and the two UI chime tones are lightly enveloped so they don't click.
+# V5.3 kid-fun pass: bouncy "boing" pop-ins on every text element instead of
+# a flat fade, a playful wiggle on the keyword highlight, a scattered field
+# of twinkling confetti squares throughout the clip, a celebratory sparkle
+# burst around the end card, and the chimes are now a 2-note "sparkle" cue
+# plus a 3-note rising "ta-da!" instead of two flat beeps. Also fixed a
+# latent filtergraph bug where the audio chain reused the video chain's
+# [a0]/[c1] labels (ffmpeg requires every pad label to be globally unique).
 
 import argparse
 import base64
@@ -19,7 +26,8 @@ import urllib.request
 from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+INTRO_DRIVE_FILE_ID = "1XYCM2RNf2GKD6drSPCwi6rDKWsK_QZpy"
+CLOSURE_DRIVE_FILE_ID = "1k475L6gmS0xHc4TzS1E775II6tHp3-bD"
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -166,6 +174,57 @@ def fade_alpha(start, end, fade=0.15):
         f"if(lt(t,{end:.3f}),({end:.3f}-t)/{fade:.3f},0))))"
     )
 
+def bounce_offset(start, amp=16.0, dur=0.32, freq=15.0):
+    """
+    A kid-friendly "boing" used for text pop-ins: at `start` the element is
+    offset by `amp` pixels, then springs toward its resting position with a
+    couple of quick decaying oscillations before settling at 0. Add this to
+    a resting y (or x) coordinate instead of using a flat fade-in, so text
+    feels like it bounces onto screen rather than just appearing.
+    """
+    return (
+        f"if(lt(t,{start:.3f}),{amp:.1f},"
+        f"{amp:.1f}*exp(-9*(t-{start:.3f}))*cos({freq:.1f}*(t-{start:.3f})))"
+    )
+
+def build_confetti(chain_in, specs, prefix):
+    """
+    Chain a handful of tiny squares onto `chain_in` that twinkle on and off
+    forever on their own repeating cycle, like a scattered field of
+    confetti/sparkles. Each spec is (x, y, size, color, phase, period,
+    on_frac). Keep specs near the frame edges so they never compete with the
+    hook/caption/keyword text for attention.
+    """
+    parts = []
+    label = chain_in
+    for idx, (x, y, size, color, phase, period, on_frac) in enumerate(specs):
+        nxt = f"{prefix}{idx}"
+        on_dur = period * on_frac
+        parts.append(
+            f"[{label}]drawbox=x={x}:y={y}:w={size}:h={size}:color={color}@0.85:t=fill:"
+            f"enable='lt(mod(t+{phase:.2f},{period:.2f}),{on_dur:.2f})'[{nxt}];"
+        )
+        label = nxt
+    return "".join(parts), label
+
+def build_sparkle_burst(chain_in, specs, prefix, final_label=None):
+    """
+    Chain a handful of tiny squares onto `chain_in` that each flash once
+    inside their own (t0, t1) window, used for a one-off celebratory burst
+    around the end card rather than a continuous twinkle.
+    """
+    parts = []
+    label = chain_in
+    n = len(specs)
+    for idx, (x, y, size, color, t0, t1) in enumerate(specs):
+        nxt = final_label if (final_label and idx == n - 1) else f"{prefix}{idx}"
+        parts.append(
+            f"[{label}]drawbox=x={x}:y={y}:w={size}:h={size}:color={color}@0.92:t=fill:"
+            f"enable='between(t,{t0:.2f},{t1:.2f})'[{nxt}];"
+        )
+        label = nxt
+    return "".join(parts), label
+
 def style_from_id(short_id):
     digest = hashlib.sha256(str(short_id).encode("utf-8")).digest()
     return digest[0] % 6
@@ -295,7 +354,7 @@ def keyword_from_topic(topic, category):
 
 
 def normalize_intro(src, dest):
-    """Normalize the channel intro to the exact same technical format as edited Shorts."""
+    """Normalize an intro/closure clip to the exact same technical format as edited Shorts."""
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
         "-vf",
@@ -341,6 +400,46 @@ def prepend_intro(intro, body, output, xfade_dur=0.35):
         str(output),
     ]
     run(cmd)
+
+
+def append_closure(body_with_intro, closure, output, xfade_dur=0.35):
+    """
+    Append the fixed KP Kids closure AFTER the edited Short.
+
+    A short video/audio crossfade is used so the Short flows naturally
+    into the closure instead of ending with a hard cut.
+    """
+    main_dur = ffprobe_duration(body_with_intro)
+    closure_dur = ffprobe_duration(closure)
+
+    # Keep the dissolve safely shorter than either clip.
+    xfade_dur = min(
+        xfade_dur,
+        max(main_dur - 0.05, 0.05),
+        max(closure_dur - 0.05, 0.05),
+    )
+    offset = max(0.0, main_dur - xfade_dur)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(body_with_intro),
+        "-i", str(closure),
+        "-filter_complex",
+        "[0:v]setpts=PTS-STARTPTS[v0];"
+        "[1:v]setpts=PTS-STARTPTS[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
+        f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", "24",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    run(cmd)
+
 
 def edit_video(src, out, payload):
     short_id = payload.get("short_id", "")
@@ -424,7 +523,7 @@ def edit_video(src, out, payload):
     # Smooth one-time scale bump. Outside the punch window scale stays at 1.0.
     punch_scale = (
         f"if(between(t,{punch_start:.2f},{punch_end:.2f}),"
-        f"1+0.018*sin(PI*(t-{punch_start:.2f})/"
+        f"1+0.032*sin(PI*(t-{punch_start:.2f})/"
         f"{max(punch_end-punch_start,0.1):.3f}),1)"
     )
 
@@ -432,6 +531,28 @@ def edit_video(src, out, payload):
     caption_end = min(4.7, max(3.2, duration - 4.5))
     keyword_start = 5.15
     keyword_end = min(6.35, max(5.75, duration - 3.5))
+
+    # Scattered confetti/sparkle field: small squares near the frame edges
+    # that twinkle on a repeating cycle for the whole clip.
+    twinkle_specs = [
+        (46, 260, 20, theme["accent"], 0.05, 1.6, 0.35),
+        (1006, 320, 16, "white", 0.40, 1.9, 0.30),
+        (50, 700, 18, theme["box"], 0.90, 1.7, 0.32),
+        (996, 760, 22, theme["accent"], 1.30, 2.1, 0.28),
+        (48, 1150, 16, "white", 0.60, 1.5, 0.35),
+        (998, 1620, 20, theme["box"], 1.10, 1.8, 0.30),
+    ]
+    twinkle_vf, twinkle_out = build_confetti("a1", twinkle_specs, "tw")
+
+    # One-off celebratory sparkle burst timed to pop around the end card.
+    burst_specs = [
+        (100, 96, 16, "white", end_start + 0.05, min(duration - 0.02, end_start + 0.40)),
+        (60, 210, 14, theme["accent"], end_start + 0.25, min(duration - 0.02, end_start + 0.60)),
+        (990, 100, 16, theme["accent"], end_start + 0.15, min(duration - 0.02, end_start + 0.55)),
+        (950, 220, 14, "white", end_start + 0.40, min(duration - 0.02, end_start + 0.80)),
+        (520, 60, 12, theme["box"], end_start + 0.55, min(duration - 0.02, end_start + 0.95)),
+    ]
+    burst_vf, _ = build_sparkle_burst("etxt", burst_specs, "sp", final_label="vout")
 
     vf = (
         "[0:v]split=2[bg][fg];"
@@ -466,13 +587,13 @@ def edit_video(src, out, payload):
         f"enable='between(t,{intro_start},{intro_end})'[i1];"
         f"[i1]drawtext=fontfile={FONT}:text='{esc(hook)}':fontcolor=white:fontsize=50:"
         "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
-        f"x=(w-text_w)/2:y={hook_y+4}:"
+        f"x=(w-text_w)/2:y='{hook_y+4}+{bounce_offset(intro_start)}':"
         f"alpha='{fade_alpha(intro_start, intro_end)}'[i2];"
 
         # specific topic line (previously computed but never rendered)
         f"[i2]drawtext=fontfile={FONT}:text='{esc(topic_text)}':fontcolor=white@0.92:fontsize=34:"
         "shadowx=1:shadowy=1:shadowcolor=black@0.55:"
-        f"x={topic_x_expr}:y={topic_y}:"
+        f"x={topic_x_expr}:y='{topic_y}+{bounce_offset(intro_start, amp=10.0)}':"
         f"alpha='{fade_alpha(intro_start, intro_end)}'[i3];"
 
         # smart short caption
@@ -480,15 +601,17 @@ def edit_video(src, out, payload):
         f"enable='between(t,{caption_start:.2f},{caption_end:.2f})'[c0];"
         f"[c0]drawtext=fontfile={FONT}:text='{esc(caption_text)}':fontcolor=white:fontsize=46:"
         "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
-        f"x=(w-text_w)/2:y=1528:"
+        f"x=(w-text_w)/2:y='1528+{bounce_offset(caption_start, amp=14.0)}':"
         f"alpha='{fade_alpha(caption_start, caption_end)}'[c1];"
 
-        # highlighted keyword
+        # highlighted keyword: pops in with a bounce, then wiggles playfully
+        # side-to-side for the rest of its on-screen time.
         f"[c1]drawbox=x=270:y=250:w=540:h=104:color={theme['accent']}@0.86:t=fill:"
         f"enable='between(t,{keyword_start:.2f},{keyword_end:.2f})'[k0];"
         f"[k0]drawtext=fontfile={FONT}:text='{esc(keyword_text)}':fontcolor=black:fontsize=52:"
         "borderw=0:shadowx=1:shadowy=1:shadowcolor=white@0.25:"
-        f"x=(w-text_w)/2:y=278:"
+        f"x=(w-text_w)/2+7*sin(24*(t-{keyword_start:.3f})):"
+        f"y='278+{bounce_offset(keyword_start, amp=14.0)}':"
         f"alpha='{fade_alpha(keyword_start, keyword_end)}'[k1];"
 
         # light decorative accents
@@ -497,8 +620,12 @@ def edit_video(src, out, payload):
         f"[a0]drawbox=x=930:y=286:w=20:h=20:color=white@0.65:t=fill:"
         f"enable='between(t,{accent_start},{accent_end})'[a1];"
 
+        # scattered confetti/sparkle field along the edges, twinkling on and
+        # off for the whole clip so the frame always feels a little alive
+        f"{twinkle_vf}"
+
         # progress bar
-        f"[a1]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
+        f"[{twinkle_out}]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
         f"[p0]drawbox=x=55:y={progress_y}:w='{progress_expr}':h=12:color={theme['accent']}@0.92:t=fill[p1];"
 
         # end card
@@ -508,13 +635,26 @@ def edit_video(src, out, payload):
         f"enable='between(t,{end_start:.2f},{duration:.2f})'[e1];"
         f"[e1]drawtext=fontfile={FONT}:text='{esc(end_text)}':fontcolor=white:fontsize=58:"
         "borderw=1:bordercolor=black@0.18:shadowx=3:shadowy=3:shadowcolor=black@0.50:"
-        f"x=(w-text_w)/2:y=153:"
-        f"alpha='{fade_alpha(end_start, duration)}'[vout]"
-    )
+        f"x=(w-text_w)/2:y='153+{bounce_offset(end_start, amp=18.0)}':"
+        f"alpha='{fade_alpha(end_start, duration)}'[etxt];"
 
-    # Audio polish: dialogue stays dominant, gentle leveling + limiter.
+        # celebratory sparkle burst around the end card
+        f"{burst_vf}"
+    )
+    vf = vf.rstrip(";")
+
+    # Audio polish: dialogue stays dominant, gentle leveling + limiter, plus
+    # two playful UI cues: a quick 2-note "sparkle" as the hook pops in, and
+    # a happy 3-note rising "ta-da!" arpeggio for the end card. Note: the
+    # labels here (aa0, ac1...) are deliberately distinct from the video
+    # chain's a0/c0/c1 labels above — vf and af get concatenated into one
+    # filter_complex string, and ffmpeg requires every pad label in that
+    # string to be globally unique, not just unique within its own "half".
     ch1_delay = 3400
-    ch2_delay = int(max(0, duration - 1.55) * 1000)
+    ch1b_delay = ch1_delay + 90
+    ch2_delay = int(max(0, duration - 1.65) * 1000)
+    ch2b_delay = ch2_delay + 90
+    ch2c_delay = ch2_delay + 180
     audio_fade_out = max(0.0, duration - 0.22)
 
     af = (
@@ -523,16 +663,30 @@ def edit_video(src, out, payload):
         "acompressor=threshold=-18dB:ratio=2.2:attack=12:release=180:makeup=1.4,"
         "alimiter=limit=0.96,"
         "afade=t=in:st=0:d=0.12,"
-        f"afade=t=out:st={audio_fade_out:.3f}:d=0.22[a0];"
+        f"afade=t=out:st={audio_fade_out:.3f}:d=0.22[aa0];"
+        # sparkle cue: two quick ascending notes when the hook badge pops in
         "sine=frequency=880:sample_rate=48000:duration=0.07,"
         "afade=t=in:st=0:d=0.015,afade=t=out:st=0.04:d=0.03,"
         "volume=0.014,adelay="
-        f"{ch1_delay}|{ch1_delay}[c1];"
-        "sine=frequency=1175:sample_rate=48000:duration=0.10,"
+        f"{ch1_delay}|{ch1_delay}[ac1];"
+        "sine=frequency=1175:sample_rate=48000:duration=0.08,"
+        "afade=t=in:st=0:d=0.015,afade=t=out:st=0.045:d=0.03,"
+        "volume=0.013,adelay="
+        f"{ch1b_delay}|{ch1b_delay}[ac1b];"
+        # "ta-da!" cue: three-note rising arpeggio for the end card
+        "sine=frequency=784:sample_rate=48000:duration=0.10,"
         "afade=t=in:st=0:d=0.015,afade=t=out:st=0.06:d=0.04,"
-        "volume=0.012,adelay="
-        f"{ch2_delay}|{ch2_delay}[c2];"
-        "[a0][c1][c2]amix=inputs=3:normalize=0:duration=first[aout]"
+        "volume=0.013,adelay="
+        f"{ch2_delay}|{ch2_delay}[ac2];"
+        "sine=frequency=988:sample_rate=48000:duration=0.10,"
+        "afade=t=in:st=0:d=0.015,afade=t=out:st=0.06:d=0.04,"
+        "volume=0.013,adelay="
+        f"{ch2b_delay}|{ch2b_delay}[ac2b];"
+        "sine=frequency=1245:sample_rate=48000:duration=0.15,"
+        "afade=t=in:st=0:d=0.02,afade=t=out:st=0.08:d=0.06,"
+        "volume=0.015,adelay="
+        f"{ch2c_delay}|{ch2c_delay}[ac2c];"
+        "[aa0][ac1][ac1b][ac2][ac2b][ac2c]amix=inputs=6:normalize=0:duration=first[aout]"
     )
 
     cmd = [
@@ -561,9 +715,15 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         src = td / "source.mp4"
+
         intro_raw = td / "kp_kids_intro_raw.mp4"
         intro_norm = td / "kp_kids_intro_normalized.mp4"
+
+        closure_raw = td / "kp_kids_closure_raw.mp4"
+        closure_norm = td / "kp_kids_closure_normalized.mp4"
+
         edited_body = td / "kp_kids_edited_body.mp4"
+        body_with_intro = td / "kp_kids_with_intro.mp4"
 
         # 1) Download the generated Short
         download(source_url, src)
@@ -571,19 +731,28 @@ def main():
         # 2) Apply KP Kids Smart Kids Edit to the Short itself
         result = edit_video(src, edited_body, payload)
 
-        # 3) Download the fixed KP Kids channel intro from Google Drive
+        # 3) Download + normalize the fixed KP Kids INTRO from Google Drive
         download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw)
-
-        # 4) Normalize intro and prepend it to the edited Short
         normalize_intro(intro_raw, intro_norm)
-        prepend_intro(intro_norm, edited_body, Path(args.output))
+
+        # 4) Put the intro before the edited Short with a short crossfade
+        prepend_intro(intro_norm, edited_body, body_with_intro)
+
+        # 5) Download + normalize the fixed KP Kids CLOSURE from Google Drive
+        download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw)
+        normalize_intro(closure_raw, closure_norm)
+
+        # 6) Put the closure after the Short with another short crossfade
+        append_closure(body_with_intro, closure_norm, Path(args.output))
 
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V5.2 Smart Kids Edit + Robust KP Kids Intro + Polish Pass"
+    meta["editor_version"] = "V5.4 Smart Kids Edit + KP Kids Intro + Closure"
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
+    meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
+    meta["closure_append_enabled"] = True
     Path("edit_result.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
