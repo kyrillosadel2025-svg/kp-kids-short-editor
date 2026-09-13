@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V5.1: Smart Kids Edit + robust Google Drive intro download
+# KP Kids Short Editor V5.2: Smart Kids Edit + robust Google Drive intro download
+# V5.2 polish pass: smooth alpha fades on all on-screen text (no more hard pop
+# in/out), a real crossfade between the intro and the Short instead of a hard
+# cut, the topic line now actually renders (was computed but never drawn),
+# and the two UI chime tones are lightly enveloped so they don't click.
 
 import argparse
 import base64
@@ -144,6 +148,22 @@ def esc(s):
         .replace(",", r"\,")
         .replace("[", r"\[")
         .replace("]", r"\]")
+    )
+
+def fade_alpha(start, end, fade=0.15):
+    """
+    Alpha expression for drawtext: smooth ease-in/ease-out instead of an
+    instant pop, using ffmpeg's 'alpha' option (per-frame expression).
+    Fully transparent outside [start, end], fully opaque in the middle,
+    with a short linear ramp of `fade` seconds on each edge.
+    """
+    span = max(end - start, 0.02)
+    fade = min(fade, span / 2)
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+fade:.3f}),(t-{start:.3f})/{fade:.3f},"
+        f"if(lt(t,{end-fade:.3f}),1,"
+        f"if(lt(t,{end:.3f}),({end:.3f}-t)/{fade:.3f},0))))"
     )
 
 def style_from_id(short_id):
@@ -292,8 +312,16 @@ def normalize_intro(src, dest):
     ]
     run(cmd)
 
-def prepend_intro(intro, body, output):
-    """Place the KP Kids intro before the edited Short and export one final MP4."""
+def prepend_intro(intro, body, output, xfade_dur=0.35):
+    """
+    Place the KP Kids intro before the edited Short and export one final MP4.
+    Uses a short professional crossfade (video xfade + audio acrossfade)
+    instead of a hard cut, so the intro dissolves into the Short.
+    """
+    intro_dur = ffprobe_duration(intro)
+    xfade_dur = min(xfade_dur, max(intro_dur - 0.05, 0.05))
+    offset = max(0.0, intro_dur - xfade_dur)
+
     cmd = [
         "ffmpeg", "-y",
         "-i", str(intro),
@@ -301,9 +329,10 @@ def prepend_intro(intro, body, output):
         "-filter_complex",
         "[0:v]setpts=PTS-STARTPTS[v0];"
         "[1:v]setpts=PTS-STARTPTS[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
         "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
-        "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]",
+        f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
         "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p", "-r", "24",
@@ -367,9 +396,13 @@ def edit_video(src, out, payload):
         y = "(ih-ih/zoom)/2"
         hook_y, topic_y, progress_y = 1505, 110, 1848
 
+    # Topic line shares the hook's intro window (0-2s). When that slot sits
+    # near the top of the frame, right-align it so it clears the always-on
+    # "KP KIDS" brand pill in the top-left instead of sweeping under it.
+    topic_x_expr = "(w-text_w-40)" if topic_y < 300 else "(w-text_w)/2"
+
     # Main effect timings
     intro_start, intro_end = 0.0, 2.0
-    topic_start, topic_end = 2.2, 5.0
     accent_start, accent_end = 5.0, 6.0
     end_start = max(0.0, duration - 1.9)
 
@@ -433,21 +466,30 @@ def edit_video(src, out, payload):
         f"enable='between(t,{intro_start},{intro_end})'[i1];"
         f"[i1]drawtext=fontfile={FONT}:text='{esc(hook)}':fontcolor=white:fontsize=50:"
         "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
-        f"x=(w-text_w)/2:y={hook_y+4}:enable='between(t,{intro_start},{intro_end})'[i2];"
+        f"x=(w-text_w)/2:y={hook_y+4}:"
+        f"alpha='{fade_alpha(intro_start, intro_end)}'[i2];"
+
+        # specific topic line (previously computed but never rendered)
+        f"[i2]drawtext=fontfile={FONT}:text='{esc(topic_text)}':fontcolor=white@0.92:fontsize=34:"
+        "shadowx=1:shadowy=1:shadowcolor=black@0.55:"
+        f"x={topic_x_expr}:y={topic_y}:"
+        f"alpha='{fade_alpha(intro_start, intro_end)}'[i3];"
 
         # smart short caption
-        f"[i2]drawbox=x=95:y=1500:w=890:h=104:color=black@0.34:t=fill:"
+        f"[i3]drawbox=x=95:y=1500:w=890:h=104:color=black@0.34:t=fill:"
         f"enable='between(t,{caption_start:.2f},{caption_end:.2f})'[c0];"
         f"[c0]drawtext=fontfile={FONT}:text='{esc(caption_text)}':fontcolor=white:fontsize=46:"
         "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
-        f"x=(w-text_w)/2:y=1528:enable='between(t,{caption_start:.2f},{caption_end:.2f})'[c1];"
+        f"x=(w-text_w)/2:y=1528:"
+        f"alpha='{fade_alpha(caption_start, caption_end)}'[c1];"
 
         # highlighted keyword
         f"[c1]drawbox=x=270:y=250:w=540:h=104:color={theme['accent']}@0.86:t=fill:"
         f"enable='between(t,{keyword_start:.2f},{keyword_end:.2f})'[k0];"
         f"[k0]drawtext=fontfile={FONT}:text='{esc(keyword_text)}':fontcolor=black:fontsize=52:"
         "borderw=0:shadowx=1:shadowy=1:shadowcolor=white@0.25:"
-        f"x=(w-text_w)/2:y=278:enable='between(t,{keyword_start:.2f},{keyword_end:.2f})'[k1];"
+        f"x=(w-text_w)/2:y=278:"
+        f"alpha='{fade_alpha(keyword_start, keyword_end)}'[k1];"
 
         # light decorative accents
         f"[k1]drawbox=x=118:y=240:w=34:h=34:color={theme['accent']}@0.72:t=fill:"
@@ -466,7 +508,8 @@ def edit_video(src, out, payload):
         f"enable='between(t,{end_start:.2f},{duration:.2f})'[e1];"
         f"[e1]drawtext=fontfile={FONT}:text='{esc(end_text)}':fontcolor=white:fontsize=58:"
         "borderw=1:bordercolor=black@0.18:shadowx=3:shadowy=3:shadowcolor=black@0.50:"
-        f"x=(w-text_w)/2:y=153:enable='between(t,{end_start:.2f},{duration:.2f})'[vout]"
+        f"x=(w-text_w)/2:y=153:"
+        f"alpha='{fade_alpha(end_start, duration)}'[vout]"
     )
 
     # Audio polish: dialogue stays dominant, gentle leveling + limiter.
@@ -481,9 +524,13 @@ def edit_video(src, out, payload):
         "alimiter=limit=0.96,"
         "afade=t=in:st=0:d=0.12,"
         f"afade=t=out:st={audio_fade_out:.3f}:d=0.22[a0];"
-        "sine=frequency=880:sample_rate=48000:duration=0.07,volume=0.014,adelay="
+        "sine=frequency=880:sample_rate=48000:duration=0.07,"
+        "afade=t=in:st=0:d=0.015,afade=t=out:st=0.04:d=0.03,"
+        "volume=0.014,adelay="
         f"{ch1_delay}|{ch1_delay}[c1];"
-        "sine=frequency=1175:sample_rate=48000:duration=0.10,volume=0.012,adelay="
+        "sine=frequency=1175:sample_rate=48000:duration=0.10,"
+        "afade=t=in:st=0:d=0.015,afade=t=out:st=0.06:d=0.04,"
+        "volume=0.012,adelay="
         f"{ch2_delay}|{ch2_delay}[c2];"
         "[a0][c1][c2]amix=inputs=3:normalize=0:duration=first[aout]"
     )
@@ -534,7 +581,7 @@ def main():
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V5.1 Smart Kids Edit + Robust KP Kids Intro"
+    meta["editor_version"] = "V5.2 Smart Kids Edit + Robust KP Kids Intro + Polish Pass"
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
     Path("edit_result.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
