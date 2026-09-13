@@ -30,7 +30,7 @@ from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 INTRO_DRIVE_FILE_ID = "1XYCM2RNf2GKD6drSPCwi6rDKWsK_QZpy"
-CLOSURE_DRIVE_FILE_ID = "1k475L6gmS0xHc4TzS1E775II6tHp3-bD"
+CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
