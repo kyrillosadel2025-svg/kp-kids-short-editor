@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V5.4: Smart Kids Edit + Google Drive Intro + Closure
+# KP Kids Short Editor V5.5: Smart Kids Edit + Intro + Closure + Robust Drive Retry
 # V5.2 polish pass: smooth alpha fades on all on-screen text (no more hard pop
 # in/out), a real crossfade between the intro and the Short instead of a hard
 # cut, the topic line now actually renders (was computed but never drawn),
@@ -22,7 +22,10 @@ import re
 import html
 import subprocess
 import tempfile
+import time
 import urllib.request
+import urllib.error
+import urllib.parse
 from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -51,89 +54,185 @@ def looks_like_mp4(path):
     except Exception:
         return False
 
-def download_google_drive_file(file_id, dest):
+def download_google_drive_file(file_id, dest, label="Google Drive video"):
     """
     Robust public Google Drive downloader using only the Python standard library.
-    Handles Google Drive confirmation/interstitial HTML and refuses to pass HTML to FFmpeg.
+
+    Improvements in V5.5:
+    - retries transient Google 429/5xx errors
+    - tries several Drive download endpoints
+    - handles Drive HTML confirmation/interstitial forms
+    - validates that the downloaded file is really an MP4 before FFmpeg sees it
     """
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    opener.addheaders = [("User-Agent", "Mozilla/5.0 KP-Kids-Editor/5.1")]
-
-    urls = [
-        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
-        f"https://drive.google.com/uc?export=download&id={file_id}",
+    opener.addheaders = [
+        ("User-Agent", "Mozilla/5.0 KP-Kids-Editor/5.5"),
+        ("Accept", "*/*"),
     ]
 
+    endpoints = [
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download",
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+        f"https://drive.google.com/file/d/{file_id}/view?usp=sharing",
+    ]
+
+    retryable = {429, 500, 502, 503, 504}
     last_error = None
 
-    for first_url in urls:
-        try:
-            req = urllib.request.Request(first_url)
-            with opener.open(req, timeout=180) as r:
-                data = r.read()
-                ctype = (r.headers.get("Content-Type") or "").lower()
+    def fetch(url, attempts=3):
+        nonlocal last_error
+        for attempt in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(url)
+                with opener.open(req, timeout=180) as r:
+                    return r.read(), (r.headers.get("Content-Type") or "").lower(), r.geturl()
+            except urllib.error.HTTPError as e:
+                last_error = e
+                if e.code in retryable and attempt < attempts:
+                    wait = 2 if attempt == 1 else 6
+                    print(
+                        f"{label}: Google Drive HTTP {e.code}; retrying in {wait}s "
+                        f"({attempt}/{attempts})...",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < attempts:
+                    wait = 2 if attempt == 1 else 6
+                    print(
+                        f"{label}: download attempt failed; retrying in {wait}s "
+                        f"({attempt}/{attempts})...",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("unreachable")
 
-            Path(dest).write_bytes(data)
+    def save_if_mp4(data, ctype):
+        Path(dest).write_bytes(data)
+        return "text/html" not in ctype and looks_like_mp4(dest)
 
-            if "text/html" not in ctype and looks_like_mp4(dest):
-                return
+    def candidate_urls_from_html(html_text, base_url):
+        candidates = []
 
-            # If Google returned an HTML confirmation page, extract the real download URL/token.
-            html_text = data.decode("utf-8", errors="ignore")
-
-            # Newer Drive pages often expose a form action or download URL.
-            patterns = [
-                r'href="([^"]*?/uc\?export=download[^"]+)"',
-                r'action="([^"]*?/download[^"]+)"',
-                r'"downloadUrl":"([^"]+)"',
-            ]
-
-            candidates = []
-            for pat in patterns:
-                m = re.search(pat, html_text)
-                if m:
-                    u = html.unescape(m.group(1)).replace("\\u003d", "=").replace("\\u0026", "&")
-                    if u.startswith("/"):
-                        u = "https://drive.google.com" + u
+        # Direct links / JSON download URL exposed by Drive pages.
+        patterns = [
+            r'href="([^"]*?/uc\?export=download[^"]+)"',
+            r'action="([^"]*?/download[^"]+)"',
+            r'"downloadUrl":"([^"]+)"',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, html_text):
+                u = html.unescape(m.group(1))
+                u = (
+                    u.replace("\u003d", "=")
+                     .replace("\u0026", "&")
+                     .replace("\/", "/")
+                )
+                if u.startswith("/"):
+                    u = urllib.parse.urljoin(base_url, u)
+                if u.startswith("http"):
                     candidates.append(u)
 
-            # Confirmation token fallback
-            m = re.search(r'confirm=([0-9A-Za-z_-]+)', html_text)
-            if m:
-                candidates.append(
-                    f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm={m.group(1)}"
+        # Drive confirmation forms commonly contain hidden confirm / uuid values.
+        form = re.search(
+            r'<form[^>]+(?:id="download-form"[^>]*|action="([^"]*/download[^"]*)")[^>]*>(.*?)</form>',
+            html_text,
+            re.I | re.S,
+        )
+        if form:
+            whole = form.group(0)
+            action_m = re.search(r'action="([^"]+)"', whole, re.I)
+            action = html.unescape(action_m.group(1)) if action_m else (
+                "https://drive.usercontent.google.com/download"
+            )
+            action = urllib.parse.urljoin(base_url, action)
+
+            params = {}
+            for m in re.finditer(
+                r'<input[^>]+type="hidden"[^>]+name="([^"]+)"[^>]+value="([^"]*)"',
+                whole,
+                re.I,
+            ):
+                params[html.unescape(m.group(1))] = html.unescape(m.group(2))
+
+            # Some markup uses value before name.
+            for m in re.finditer(
+                r'<input[^>]+value="([^"]*)"[^>]+name="([^"]+)"[^>]+type="hidden"',
+                whole,
+                re.I,
+            ):
+                params[html.unescape(m.group(2))] = html.unescape(m.group(1))
+
+            params.setdefault("id", file_id)
+            params.setdefault("export", "download")
+            if params:
+                candidates.append(action + "?" + urllib.parse.urlencode(params))
+
+        # Fallback token scrape.
+        m = re.search(r'confirm=([0-9A-Za-z_-]+)', html_text)
+        if m:
+            candidates.append(
+                "https://drive.usercontent.google.com/download?"
+                + urllib.parse.urlencode(
+                    {"id": file_id, "export": "download", "confirm": m.group(1)}
                 )
+            )
+
+        # Preserve order while removing duplicates.
+        seen = set()
+        uniq = []
+        for u in candidates:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        return uniq
+
+    for first_url in endpoints:
+        try:
+            data, ctype, final_url = fetch(first_url)
+
+            if save_if_mp4(data, ctype):
+                print(f"{label}: downloaded successfully.", flush=True)
+                return
+
+            # Google returned HTML: try confirmation/form/download links from the page.
+            html_text = data.decode("utf-8", errors="ignore")
+            candidates = candidate_urls_from_html(html_text, final_url)
 
             for u in candidates:
                 try:
-                    req2 = urllib.request.Request(u)
-                    with opener.open(req2, timeout=180) as r2:
-                        data2 = r2.read()
-                        ctype2 = (r2.headers.get("Content-Type") or "").lower()
-
-                    Path(dest).write_bytes(data2)
-
-                    if "text/html" not in ctype2 and looks_like_mp4(dest):
+                    data2, ctype2, _ = fetch(u)
+                    if save_if_mp4(data2, ctype2):
+                        print(f"{label}: downloaded successfully after Drive confirmation.", flush=True)
                         return
                 except Exception as e:
                     last_error = e
 
-            # Preserve a useful diagnostic if still HTML.
             if "text/html" in ctype:
                 last_error = RuntimeError(
-                    "Google Drive returned an HTML page instead of the MP4. "
-                    "Make sure the intro file is shared as 'Anyone with the link -> Viewer'."
+                    f"{label}: Google Drive returned an HTML page instead of the MP4. "
+                    "Make sure sharing is 'Anyone with the link -> Viewer'."
                 )
             else:
-                last_error = RuntimeError("Downloaded intro is not a valid MP4 file.")
+                last_error = RuntimeError(
+                    f"{label}: downloaded data is not a valid MP4 file."
+                )
 
         except Exception as e:
             last_error = e
+            continue
 
     raise RuntimeError(
-        "Could not download a valid KP Kids intro from Google Drive. "
-        "Check sharing permissions or replace the intro file link."
+        f"Could not download {label} from Google Drive after retries. "
+        "Check that the file ID is correct and sharing is 'Anyone with the link -> Viewer'."
     ) from last_error
 
 def ffprobe_duration(path):
@@ -732,14 +831,14 @@ def main():
         result = edit_video(src, edited_body, payload)
 
         # 3) Download + normalize the fixed KP Kids INTRO from Google Drive
-        download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw)
+        download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
         normalize_intro(intro_raw, intro_norm)
 
         # 4) Put the intro before the edited Short with a short crossfade
         prepend_intro(intro_norm, edited_body, body_with_intro)
 
         # 5) Download + normalize the fixed KP Kids CLOSURE from Google Drive
-        download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw)
+        download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
         normalize_intro(closure_raw, closure_norm)
 
         # 6) Put the closure after the Short with another short crossfade
@@ -748,7 +847,7 @@ def main():
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V5.4 Smart Kids Edit + KP Kids Intro + Closure"
+    meta["editor_version"] = "V5.5 Smart Kids Edit + KP Kids Intro + Closure + Drive Retry"
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
