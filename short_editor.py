@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V3 Clean Pro: stable framing, branded UI, color/audio polish
+# KP Kids Short Editor V4 Smart Kids Edit: smart captions, keyword highlight, one smooth punch-in
 
 import argparse
 import base64
@@ -123,10 +123,64 @@ def category_theme(category):
     }
     return themes.get(c, {"box":"0x3A7BFF", "accent":"0xFFD54A", "end":"0x2C5FCC"})
 
+
+def smart_caption(category, topic):
+    c = str(category or "").lower()
+    t = str(topic or "").strip()
+    # Keep captions intentionally short and generic-safe.
+    mapping = {
+        "alphabet": "Let’s learn a letter!",
+        "letters": "Match the letters!",
+        "phonics": "Listen to the sound!",
+        "numbers": "Let’s count together!",
+        "counting": "Count with us!",
+        "shapes": "Can you spot the shape?",
+        "colors": "Look at the color!",
+        "science": "Let’s discover something!",
+        "space": "Explore space with us!",
+        "nature": "Look closely at nature!",
+        "body": "Learn about your body!",
+        "safety": "Stay safe and smart!",
+        "emotions": "Let’s talk about feelings!",
+        "manners": "Kind words matter!",
+        "community": "Meet our helpers!",
+        "transport": "Let’s learn how we move!",
+        "weather": "What’s the weather like?",
+        "animals": "Meet an amazing animal!",
+        "food": "Let’s learn about food!",
+        "math": "Let’s solve it together!",
+        "opposites": "Find the opposite!",
+        "world": "Explore our world!",
+        "positions": "Where is it?",
+        "sorting": "Let’s sort them!",
+        "patterns": "Find the pattern!",
+        "sizes": "Which one is bigger?",
+        "directions": "Which way should we go?",
+        "calendar": "Let’s learn the days!",
+        "seasons": "What season is it?",
+        "time": "Let’s learn our routine!",
+    }
+    return mapping.get(c, "Let’s learn together!")
+
+def keyword_from_topic(topic, category):
+    t = str(topic or "").strip()
+    if not t:
+        return category_label(category).replace(" TIME", "").replace(" FUN", "")[:16]
+    # Choose a useful compact token from the provided topic, avoiding filler words.
+    bad = {"and","the","with","for","from","into","about","this","that","time","kids","learn","learning"}
+    words = [w.strip(".,!?;:-_()[]{}'\"") for w in t.split()]
+    candidates = [w for w in words if len(w) >= 3 and w.lower() not in bad]
+    if not candidates:
+        return words[0][:16] if words else "LEARN"
+    candidates.sort(key=lambda w: (-len(w), words.index(w)))
+    return candidates[0][:16].upper()
+
 def edit_video(src, out, payload):
     short_id = payload.get("short_id", "")
     category = str(payload.get("category", "")).lower()
     topic = str(payload.get("topic", "") or payload.get("title", "KP Kids"))
+    caption_text = smart_caption(category, topic)
+    keyword_text = keyword_from_topic(topic, category)
     style = style_from_id(short_id)
     theme = category_theme(category)
     duration = min(15.0, ffprobe_duration(src))
@@ -184,15 +238,29 @@ def edit_video(src, out, payload):
     # Progress bar width expression based on time
     progress_expr = f"(970*min(t/{max(duration,0.1):.3f},1))"
 
-    # Clean, stable professional treatment:
-    # - no oscillating camera motion
-    # - mild color/contrast/sharpness polish
-    # - subtle vignette
-    # - safe-area brand bug
-    # - category badge
-    # - slim progress bar
-    # - clean end card
+    # V4 Smart Kids Edit:
+    # - stable base image
+    # - one smooth punch-in only (not continuous motion)
+    # - short safe caption
+    # - one highlighted keyword
+    # - branded UI without covering too much of the scene
     fade_out_start = max(0.0, duration - 0.28)
+    punch_start = 6.0
+    punch_end = min(duration - 2.2, 7.2)
+    if punch_end <= punch_start:
+        punch_start, punch_end = 5.2, min(duration - 1.8, 6.2)
+
+    # Smooth one-time scale bump. Outside the punch window scale stays at 1.0.
+    punch_scale = (
+        f"if(between(t,{punch_start:.2f},{punch_end:.2f}),"
+        f"1+0.018*sin(PI*(t-{punch_start:.2f})/"
+        f"{max(punch_end-punch_start,0.1):.3f}),1)"
+    )
+
+    caption_start = 2.15
+    caption_end = min(4.7, max(3.2, duration - 4.5))
+    keyword_start = 5.15
+    keyword_end = min(6.35, max(5.75, duration - 3.5))
 
     vf = (
         "[0:v]split=2[bg][fg];"
@@ -205,18 +273,22 @@ def edit_video(src, out, payload):
         "[base]vignette=PI/5.5:eval=frame,"
         "fade=t=in:st=0:d=0.18,"
         f"fade=t=out:st={fade_out_start:.3f}:d=0.28,"
-        "fps=24[z0];"
+        "fps=24[stable];"
+
+        # one smooth micro punch-in
+        f"[stable]scale=w='1080*{punch_scale}':h='1920*{punch_scale}':eval=frame[pz];"
+        "[pz]crop=1080:1920:(iw-1080)/2:(ih-1920)/2[z0];"
 
         # ultra-subtle frame
         "[z0]drawbox=x=38:y=88:w=1004:h=1784:color=white@0.08:t=3[z1];"
 
-        # small brand pill - always safe and relevant
+        # small brand pill
         f"[z1]drawbox=x=54:y=54:w=235:h=64:color={theme['box']}@0.78:t=fill[b0];"
         f"[b0]drawbox=x=54:y=54:w=10:h=64:color={theme['accent']}@0.98:t=fill[b1];"
         f"[b1]drawtext=fontfile={FONT}:text='KP KIDS':fontcolor=white:fontsize=31:"
         "shadowx=1:shadowy=1:shadowcolor=black@0.45:x=82:y=69[b2];"
 
-        # category intro badge
+        # category badge
         f"[b2]drawbox=x=80:y={hook_y-18}:w=920:h=102:color=black@0.28:t=fill:"
         f"enable='between(t,{intro_start},{intro_end})'[i0];"
         f"[i0]drawbox=x=80:y={hook_y-18}:w=14:h=102:color={theme['accent']}@0.98:t=fill:"
@@ -225,17 +297,31 @@ def edit_video(src, out, payload):
         "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
         f"x=(w-text_w)/2:y={hook_y+4}:enable='between(t,{intro_start},{intro_end})'[i2];"
 
-        # two very light decorative accent blocks
-        f"[i2]drawbox=x=118:y=240:w=34:h=34:color={theme['accent']}@0.72:t=fill:"
+        # smart short caption
+        f"[i2]drawbox=x=95:y=1500:w=890:h=104:color=black@0.34:t=fill:"
+        f"enable='between(t,{caption_start:.2f},{caption_end:.2f})'[c0];"
+        f"[c0]drawtext=fontfile={FONT}:text='{esc(caption_text)}':fontcolor=white:fontsize=46:"
+        "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
+        f"x=(w-text_w)/2:y=1528:enable='between(t,{caption_start:.2f},{caption_end:.2f})'[c1];"
+
+        # highlighted keyword
+        f"[c1]drawbox=x=270:y=250:w=540:h=104:color={theme['accent']}@0.86:t=fill:"
+        f"enable='between(t,{keyword_start:.2f},{keyword_end:.2f})'[k0];"
+        f"[k0]drawtext=fontfile={FONT}:text='{esc(keyword_text)}':fontcolor=black:fontsize=52:"
+        "borderw=0:shadowx=1:shadowy=1:shadowcolor=white@0.25:"
+        f"x=(w-text_w)/2:y=278:enable='between(t,{keyword_start:.2f},{keyword_end:.2f})'[k1];"
+
+        # light decorative accents
+        f"[k1]drawbox=x=118:y=240:w=34:h=34:color={theme['accent']}@0.72:t=fill:"
         f"enable='between(t,{accent_start},{accent_end})'[a0];"
         f"[a0]drawbox=x=930:y=286:w=20:h=20:color=white@0.65:t=fill:"
         f"enable='between(t,{accent_start},{accent_end})'[a1];"
 
-        # progress bar rail + fill
+        # progress bar
         f"[a1]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
         f"[p0]drawbox=x=55:y={progress_y}:w='{progress_expr}':h=12:color={theme['accent']}@0.92:t=fill[p1];"
 
-        # end card panel
+        # end card
         f"[p1]drawbox=x=145:y=116:w=790:h=138:color=black@0.34:t=fill:"
         f"enable='between(t,{end_start:.2f},{duration:.2f})'[e0];"
         f"[e0]drawbox=x=145:y=116:w=18:h=138:color={theme['accent']}@0.98:t=fill:"
@@ -296,6 +382,7 @@ def main():
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
+    meta["editor_version"] = "V4 Smart Kids Edit"
     Path("edit_result.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
