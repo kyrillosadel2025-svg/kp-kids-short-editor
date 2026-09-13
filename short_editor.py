@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# KP Kids Short Editor V3 Clean Pro: stable framing, branded UI, color/audio polish
 
 import argparse
 import base64
@@ -183,49 +184,82 @@ def edit_video(src, out, payload):
     # Progress bar width expression based on time
     progress_expr = f"(970*min(t/{max(duration,0.1):.3f},1))"
 
+    # Clean, stable professional treatment:
+    # - no oscillating camera motion
+    # - mild color/contrast/sharpness polish
+    # - subtle vignette
+    # - safe-area brand bug
+    # - category badge
+    # - slim progress bar
+    # - clean end card
+    fade_out_start = max(0.0, duration - 0.28)
+
     vf = (
         "[0:v]split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,gblur=sigma=30,eq=brightness=-0.03:saturation=1.05[bg2];"
-        "[fg]scale=1000:1778:force_original_aspect_ratio=decrease[fg2];"
+        "crop=1080:1920,gblur=sigma=32,eq=brightness=-0.045:contrast=1.04:saturation=1.08[bg2];"
+        "[fg]scale=1000:1778:force_original_aspect_ratio=decrease,"
+        "eq=contrast=1.035:saturation=1.055:gamma=1.01,"
+        "unsharp=5:5:0.35:5:5:0.0[fg2];"
         "[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base];"
-        f"[base]zoompan=z='{zoom}':x='{x}':y='{y}':d=1:s=1080x1920:fps=24[z0];"
-        # soft frame / clean border
-        "[z0]drawbox=x=40:y=90:w=1000:h=1780:color=white@0.16:t=4[z1];"
-        # progress rail
-        f"[z1]drawbox=x=55:y={progress_y}:w=970:h=18:color=black@0.25:t=fill[p0];"
-        f"[p0]drawbox=x=55:y={progress_y}:w='{progress_expr}':h=18:color={theme['accent']}@0.95:t=fill[p1];"
-        # intro label box + accent
-        f"[p1]drawbox=x=70:y={hook_y-26}:w=880:h=118:color={theme['box']}@0.82:t=fill[i0];"
-        f"[i0]drawbox=x=70:y={hook_y-26}:w=18:h=118:color={theme['accent']}@0.98:t=fill[i1];"
-        f"[i1]drawtext=fontfile={FONT}:text='{esc(hook)}':fontcolor=white:fontsize=54:"
-        f"borderw=2:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
-        f"x=(w-text_w)/2:y={hook_y}:enable='between(t,{intro_start},{intro_end})'[i2];"
-        # topic card
-        f"[i2]drawbox=x=70:y={topic_y-22}:w=940:h=112:color=black@0.30:t=fill[t0];"
-        f"[t0]drawbox=x=70:y={topic_y-22}:w=12:h=112:color={theme['accent']}@0.98:t=fill[t1];"
-        f"[t1]drawtext=fontfile={FONT}:text='{esc(topic_text)}':fontcolor=white:fontsize=50:"
-        f"borderw=2:bordercolor=black@0.18:shadowx=2:shadowy=2:shadowcolor=black@0.50:"
-        f"x=(w-text_w)/2:y={topic_y}:enable='between(t,{topic_start},{topic_end})'[t2];"
-        # simple decorative accent burst (box pair)
-        f"[t2]drawbox=x=120:y=240:w=48:h=48:color={theme['accent']}@0.92:t=fill:enable='between(t,{accent_start},{accent_end})'[a0];"
-        f"[a0]drawbox=x=920:y=280:w=28:h=28:color=white@0.85:t=fill:enable='between(t,{accent_start},{accent_end})'[a1];"
-        # end card
-        f"[a1]drawbox=x=160:y=120:w=760:h=128:color={theme['end']}@0.84:t=fill:enable='between(t,{end_start:.2f},{duration:.2f})'[e0];"
-        f"[e0]drawbox=x=160:y=120:w=20:h=128:color={theme['accent']}@0.98:t=fill:enable='between(t,{end_start:.2f},{duration:.2f})'[e1];"
-        f"[e1]drawtext=fontfile={FONT}:text='{esc(end_text)}':fontcolor=white:fontsize=60:"
-        "borderw=2:bordercolor=black@0.20:shadowx=3:shadowy=3:shadowcolor=black@0.50:"
-        f"x=(w-text_w)/2:y=152:enable='between(t,{end_start:.2f},{duration:.2f})'[vout]"
+        "[base]vignette=PI/5.5:eval=frame,"
+        "fade=t=in:st=0:d=0.18,"
+        f"fade=t=out:st={fade_out_start:.3f}:d=0.28,"
+        "fps=24[z0];"
+
+        # ultra-subtle frame
+        "[z0]drawbox=x=38:y=88:w=1004:h=1784:color=white@0.08:t=3[z1];"
+
+        # small brand pill - always safe and relevant
+        f"[z1]drawbox=x=54:y=54:w=235:h=64:color={theme['box']}@0.78:t=fill[b0];"
+        f"[b0]drawbox=x=54:y=54:w=10:h=64:color={theme['accent']}@0.98:t=fill[b1];"
+        f"[b1]drawtext=fontfile={FONT}:text='KP KIDS':fontcolor=white:fontsize=31:"
+        "shadowx=1:shadowy=1:shadowcolor=black@0.45:x=82:y=69[b2];"
+
+        # category intro badge
+        f"[b2]drawbox=x=80:y={hook_y-18}:w=920:h=102:color=black@0.28:t=fill:"
+        f"enable='between(t,{intro_start},{intro_end})'[i0];"
+        f"[i0]drawbox=x=80:y={hook_y-18}:w=14:h=102:color={theme['accent']}@0.98:t=fill:"
+        f"enable='between(t,{intro_start},{intro_end})'[i1];"
+        f"[i1]drawtext=fontfile={FONT}:text='{esc(hook)}':fontcolor=white:fontsize=50:"
+        "borderw=1:bordercolor=black@0.20:shadowx=2:shadowy=2:shadowcolor=black@0.45:"
+        f"x=(w-text_w)/2:y={hook_y+4}:enable='between(t,{intro_start},{intro_end})'[i2];"
+
+        # two very light decorative accent blocks
+        f"[i2]drawbox=x=118:y=240:w=34:h=34:color={theme['accent']}@0.72:t=fill:"
+        f"enable='between(t,{accent_start},{accent_end})'[a0];"
+        f"[a0]drawbox=x=930:y=286:w=20:h=20:color=white@0.65:t=fill:"
+        f"enable='between(t,{accent_start},{accent_end})'[a1];"
+
+        # progress bar rail + fill
+        f"[a1]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
+        f"[p0]drawbox=x=55:y={progress_y}:w='{progress_expr}':h=12:color={theme['accent']}@0.92:t=fill[p1];"
+
+        # end card panel
+        f"[p1]drawbox=x=145:y=116:w=790:h=138:color=black@0.34:t=fill:"
+        f"enable='between(t,{end_start:.2f},{duration:.2f})'[e0];"
+        f"[e0]drawbox=x=145:y=116:w=18:h=138:color={theme['accent']}@0.98:t=fill:"
+        f"enable='between(t,{end_start:.2f},{duration:.2f})'[e1];"
+        f"[e1]drawtext=fontfile={FONT}:text='{esc(end_text)}':fontcolor=white:fontsize=58:"
+        "borderw=1:bordercolor=black@0.18:shadowx=3:shadowy=3:shadowcolor=black@0.50:"
+        f"x=(w-text_w)/2:y=153:enable='between(t,{end_start:.2f},{duration:.2f})'[vout]"
     )
 
-    # Keep original dialogue dominant. Add tiny low-volume sparkle cues.
+    # Audio polish: dialogue stays dominant, gentle leveling + limiter.
     ch1_delay = 3400
     ch2_delay = int(max(0, duration - 1.55) * 1000)
+    audio_fade_out = max(0.0, duration - 0.22)
+
     af = (
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=1.0[a0];"
-        "sine=frequency=880:sample_rate=48000:duration=0.08,volume=0.020,adelay="
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+        "highpass=f=70,lowpass=f=15000,"
+        "acompressor=threshold=-18dB:ratio=2.2:attack=12:release=180:makeup=1.4,"
+        "alimiter=limit=0.96,"
+        "afade=t=in:st=0:d=0.12,"
+        f"afade=t=out:st={audio_fade_out:.3f}:d=0.22[a0];"
+        "sine=frequency=880:sample_rate=48000:duration=0.07,volume=0.014,adelay="
         f"{ch1_delay}|{ch1_delay}[c1];"
-        "sine=frequency=1175:sample_rate=48000:duration=0.12,volume=0.016,adelay="
+        "sine=frequency=1175:sample_rate=48000:duration=0.10,volume=0.012,adelay="
         f"{ch2_delay}|{ch2_delay}[c2];"
         "[a0][c1][c2]amix=inputs=3:normalize=0:duration=first[aout]"
     )
@@ -234,7 +268,7 @@ def edit_video(src, out, payload):
         "ffmpeg", "-y", "-i", str(src),
         "-filter_complex", vf + ";" + af,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p", "-r", "24",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
