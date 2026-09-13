@@ -38,9 +38,9 @@ def ffprobe_duration(path):
 def esc(s):
     return (
         str(s or "")
+        .replace("'", "’")
         .replace("\\", r"\\")
         .replace(":", r"\:")
-        .replace("'", r"\'")
         .replace("%", r"\%")
         .replace(",", r"\,")
         .replace("[", r"\[")
@@ -138,7 +138,7 @@ def edit_video(src, out, payload):
         "KEEP LEARNING!",
         "AWESOME WORK!",
         "SEE YOU NEXT TIME!",
-        "LET'S LEARN MORE!"
+        "LET’S LEARN MORE!"
     ]
     end_text = end_texts[style]
 
