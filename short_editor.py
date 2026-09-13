@@ -103,27 +103,27 @@ def edit_video(src, out, payload):
 
     # Five real editing variants: composition, framing, timing, overlay placement.
     if style == 0:
-        zoom = "1+0.018*sin(2*PI*t/6)"
+        zoom = "1+0.018*sin(2*PI*on/(24*6))"
         x = "(iw-iw/zoom)/2"
         y = "(ih-ih/zoom)/2"
         top_y, topic_y = 80, 1510
     elif style == 1:
-        zoom = "1.015+0.012*sin(2*PI*t/5)"
-        x = "(iw-iw/zoom)/2+8*sin(2*PI*t/7)"
+        zoom = "1.015+0.012*sin(2*PI*on/(24*5))"
+        x = "(iw-iw/zoom)/2+8*sin(2*PI*on/(24*7))"
         y = "(ih-ih/zoom)/2"
         top_y, topic_y = 1515, 95
     elif style == 2:
-        zoom = "1.008+0.016*sin(2*PI*t/7)"
+        zoom = "1.008+0.016*sin(2*PI*on/(24*7))"
         x = "(iw-iw/zoom)/2"
-        y = "(ih-ih/zoom)/2+10*sin(2*PI*t/8)"
+        y = "(ih-ih/zoom)/2+10*sin(2*PI*on/(24*8))"
         top_y, topic_y = 85, 1460
     elif style == 3:
-        zoom = "1.012+0.010*sin(2*PI*t/4.5)"
-        x = "(iw-iw/zoom)/2+6*sin(2*PI*t/5)"
-        y = "(ih-ih/zoom)/2+6*cos(2*PI*t/6)"
+        zoom = "1.012+0.010*sin(2*PI*on/(24*4.5))"
+        x = "(iw-iw/zoom)/2+6*sin(2*PI*on/(24*5))"
+        y = "(ih-ih/zoom)/2+6*cos(2*PI*on/(24*6))"
         top_y, topic_y = 1480, 90
     else:
-        zoom = "1.01+0.014*sin(2*PI*t/6.5)"
+        zoom = "1.01+0.014*sin(2*PI*on/(24*6.5))"
         x = "(iw-iw/zoom)/2"
         y = "(ih-ih/zoom)/2"
         top_y, topic_y = 92, 1490
