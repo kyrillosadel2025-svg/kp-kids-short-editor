@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V4 Smart Kids Edit: smart captions, keyword highlight, one smooth punch-in
+# KP Kids Short Editor V5 Final: Smart Kids Edit + automatic KP Kids intro from Google Drive
 
 import argparse
 import base64
@@ -12,6 +12,8 @@ import urllib.request
 from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+INTRO_DRIVE_FILE_ID = "1XYCM2RNf2GKD6drSPCwi6rDKWsK_QZpy"
+INTRO_DOWNLOAD_URL = f"https://drive.usercontent.google.com/download?id={INTRO_DRIVE_FILE_ID}&export=download&confirm=t"
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -174,6 +176,46 @@ def keyword_from_topic(topic, category):
         return words[0][:16] if words else "LEARN"
     candidates.sort(key=lambda w: (-len(w), words.index(w)))
     return candidates[0][:16].upper()
+
+
+def normalize_intro(src, dest):
+    """Normalize the channel intro to the exact same technical format as edited Shorts."""
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf",
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,fps=24,setsar=1,format=yuv420p",
+        "-af",
+        "aformat=sample_rates=48000:channel_layouts=stereo,"
+        "aresample=async=1:first_pts=0",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", "24",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
+        str(dest),
+    ]
+    run(cmd)
+
+def prepend_intro(intro, body, output):
+    """Place the KP Kids intro before the edited Short and export one final MP4."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(intro),
+        "-i", str(body),
+        "-filter_complex",
+        "[0:v]setpts=PTS-STARTPTS[v0];"
+        "[1:v]setpts=PTS-STARTPTS[v1];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
+        "[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", "24",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    run(cmd)
 
 def edit_video(src, out, payload):
     short_id = payload.get("short_id", "")
@@ -376,13 +418,29 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         src = td / "source.mp4"
+        intro_raw = td / "kp_kids_intro_raw.mp4"
+        intro_norm = td / "kp_kids_intro_normalized.mp4"
+        edited_body = td / "kp_kids_edited_body.mp4"
+
+        # 1) Download the generated Short
         download(source_url, src)
-        result = edit_video(src, Path(args.output), payload)
+
+        # 2) Apply KP Kids Smart Kids Edit to the Short itself
+        result = edit_video(src, edited_body, payload)
+
+        # 3) Download the fixed KP Kids channel intro from Google Drive
+        download(INTRO_DOWNLOAD_URL, intro_raw)
+
+        # 4) Normalize intro and prepend it to the edited Short
+        normalize_intro(intro_raw, intro_norm)
+        prepend_intro(intro_norm, edited_body, Path(args.output))
 
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V4 Smart Kids Edit"
+    meta["editor_version"] = "V5 Smart Kids Edit + KP Kids Intro"
+    meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
+    meta["intro_prepend_enabled"] = True
     Path("edit_result.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 if __name__ == "__main__":
