@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V5 Final: Smart Kids Edit + automatic KP Kids intro from Google Drive
+# KP Kids Short Editor V5.1: Smart Kids Edit + robust Google Drive intro download
 
 import argparse
 import base64
 import hashlib
+import http.cookiejar
 import json
+import re
+import html
 import subprocess
 import tempfile
 import urllib.request
@@ -13,7 +16,6 @@ from pathlib import Path
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 INTRO_DRIVE_FILE_ID = "1XYCM2RNf2GKD6drSPCwi6rDKWsK_QZpy"
-INTRO_DOWNLOAD_URL = f"https://drive.usercontent.google.com/download?id={INTRO_DRIVE_FILE_ID}&export=download&confirm=t"
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -27,6 +29,100 @@ def download(url, dest):
             if not chunk:
                 break
             f.write(chunk)
+
+
+def looks_like_mp4(path):
+    """Quick sanity check: MP4 files should contain an ftyp box near the beginning."""
+    try:
+        head = Path(path).read_bytes()[:64]
+        return b"ftyp" in head
+    except Exception:
+        return False
+
+def download_google_drive_file(file_id, dest):
+    """
+    Robust public Google Drive downloader using only the Python standard library.
+    Handles Google Drive confirmation/interstitial HTML and refuses to pass HTML to FFmpeg.
+    """
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    opener.addheaders = [("User-Agent", "Mozilla/5.0 KP-Kids-Editor/5.1")]
+
+    urls = [
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+    ]
+
+    last_error = None
+
+    for first_url in urls:
+        try:
+            req = urllib.request.Request(first_url)
+            with opener.open(req, timeout=180) as r:
+                data = r.read()
+                ctype = (r.headers.get("Content-Type") or "").lower()
+
+            Path(dest).write_bytes(data)
+
+            if "text/html" not in ctype and looks_like_mp4(dest):
+                return
+
+            # If Google returned an HTML confirmation page, extract the real download URL/token.
+            html_text = data.decode("utf-8", errors="ignore")
+
+            # Newer Drive pages often expose a form action or download URL.
+            patterns = [
+                r'href="([^"]*?/uc\?export=download[^"]+)"',
+                r'action="([^"]*?/download[^"]+)"',
+                r'"downloadUrl":"([^"]+)"',
+            ]
+
+            candidates = []
+            for pat in patterns:
+                m = re.search(pat, html_text)
+                if m:
+                    u = html.unescape(m.group(1)).replace("\\u003d", "=").replace("\\u0026", "&")
+                    if u.startswith("/"):
+                        u = "https://drive.google.com" + u
+                    candidates.append(u)
+
+            # Confirmation token fallback
+            m = re.search(r'confirm=([0-9A-Za-z_-]+)', html_text)
+            if m:
+                candidates.append(
+                    f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm={m.group(1)}"
+                )
+
+            for u in candidates:
+                try:
+                    req2 = urllib.request.Request(u)
+                    with opener.open(req2, timeout=180) as r2:
+                        data2 = r2.read()
+                        ctype2 = (r2.headers.get("Content-Type") or "").lower()
+
+                    Path(dest).write_bytes(data2)
+
+                    if "text/html" not in ctype2 and looks_like_mp4(dest):
+                        return
+                except Exception as e:
+                    last_error = e
+
+            # Preserve a useful diagnostic if still HTML.
+            if "text/html" in ctype:
+                last_error = RuntimeError(
+                    "Google Drive returned an HTML page instead of the MP4. "
+                    "Make sure the intro file is shared as 'Anyone with the link -> Viewer'."
+                )
+            else:
+                last_error = RuntimeError("Downloaded intro is not a valid MP4 file.")
+
+        except Exception as e:
+            last_error = e
+
+    raise RuntimeError(
+        "Could not download a valid KP Kids intro from Google Drive. "
+        "Check sharing permissions or replace the intro file link."
+    ) from last_error
 
 def ffprobe_duration(path):
     p = subprocess.run(
@@ -429,7 +525,7 @@ def main():
         result = edit_video(src, edited_body, payload)
 
         # 3) Download the fixed KP Kids channel intro from Google Drive
-        download(INTRO_DOWNLOAD_URL, intro_raw)
+        download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw)
 
         # 4) Normalize intro and prepend it to the edited Short
         normalize_intro(intro_raw, intro_norm)
@@ -438,7 +534,7 @@ def main():
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V5 Smart Kids Edit + KP Kids Intro"
+    meta["editor_version"] = "V5.1 Smart Kids Edit + Robust KP Kids Intro"
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
     Path("edit_result.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
