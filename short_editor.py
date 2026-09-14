@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.1: Intelligent Human-Like Edit + Motion Typography + Intro + Closure
-# V7.1 motion typography pass:
+# KP Kids Short Editor V7.2: Intelligent Human-Like Edit + Contextual Motion Graphics + Intro + Closure
+# V7.2 contextual motion-graphics pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
@@ -14,6 +14,9 @@
 # - adds restrained motion typography: short purposeful entrances, then stable readable text.
 # - synchronizes tiny generated SFX with text entrances and ducks them under dialogue.
 # - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
+# - adds one contextual motion-graphic cue at most, selected from lesson/category metadata.
+# - motion graphics explain/direct/reward only: focus brackets, direction arrow, shape badge, color sweep, or scan line.
+# - avoids decorative particle fields, confetti, random squares, and persistent HUD clutter.
 
 import argparse
 import base64
@@ -42,7 +45,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.1 Intelligent Human-Like Edit + Motion Typography"
+EDITOR_VERSION = "V7.2 Intelligent Human-Like Edit + Contextual Motion Graphics"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -58,6 +61,9 @@ OUTPUT_FPS = 24
 TEXT_MOTION_DURATION = 0.26
 TEXT_BOUNCE_DURATION = 0.34
 TEXT_SFX_MAX_GAIN = 0.0055
+MOTION_GRAPHICS_DURATION = 0.90
+MOTION_GRAPHICS_ENTRANCE = 0.22
+MOTION_GRAPHICS_MAX_ALPHA = 0.55
 
 
 
@@ -363,6 +369,95 @@ def motion_pop_y(base_y, start, amp=15.0, dur=TEXT_BOUNCE_DURATION):
         f"{amp:.1f}*exp(-10*(t-{start:.3f}))*cos(19*(t-{start:.3f})),0))"
     )
 
+
+def lesson_accent_color(payload, fallback="0xFFD54A"):
+    """Return a lesson-specific accent when the lesson itself names a color."""
+    key = str(payload.get("lesson_key") or "").lower()
+    topic = str(payload.get("topic") or "").lower()
+    hay = f"{key} {topic}"
+    colors = {
+        "red": "0xFF4D5A",
+        "blue": "0x4DA3FF",
+        "yellow": "0xFFD84D",
+        "green": "0x55C878",
+        "orange": "0xFF9B42",
+        "purple": "0x9B6BFF",
+        "pink": "0xFF78B7",
+        "black": "0x222222",
+        "white": "0xF5F5F5",
+    }
+    for name, value in colors.items():
+        if re.search(rf"\b{name}\b", hay):
+            return value
+    return fallback
+
+
+def shape_symbol_from_payload(payload):
+    """Simple glyphs that DejaVu Sans renders reliably; empty means no safe glyph."""
+    hay = f"{payload.get('lesson_key','')} {payload.get('topic','')}".lower()
+    mapping = [
+        ("triangle", "△"),
+        ("circle", "○"),
+        ("square", "□"),
+        ("rectangle", "▭"),
+        ("star", "★"),
+        ("heart", "♥"),
+        ("diamond", "◇"),
+        ("oval", "○"),
+    ]
+    for needle, glyph in mapping:
+        if needle in hay:
+            return glyph
+    return ""
+
+
+def build_motion_graphics_plan(payload, edit_plan, theme):
+    """
+    Choose at most one contextual motion graphic.  The cue must teach, direct
+    attention, or reinforce a reveal; it must never exist merely to decorate.
+    """
+    category = str(payload.get("category") or "").lower()
+    lesson_key = str(payload.get("lesson_key") or "").lower()
+    fmt = str(payload.get("episode_format") or "").lower()
+    lead = str(payload.get("lead_character") or "").lower()
+    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
+    h = stable_hash_int(payload.get("short_id"), lesson_key, category, fmt, "motion-graphics")
+
+    # Calm/social lessons are intentionally visually quiet most of the time.
+    if style == "CALM_LEARNING" and h % 4 != 0:
+        return {"type":"none", "sfx":"none", "reason":"calm_learning_breathing_room"}
+
+    mg_type = "none"
+    reason = "no_contextual_need"
+
+    if category == "shapes" and shape_symbol_from_payload(payload):
+        mg_type, reason = "shape_badge", "reinforce_shape_identity"
+    elif category == "colors":
+        mg_type, reason = "color_sweep", "reinforce_color_reveal"
+    elif category == "directions":
+        mg_type, reason = "direction_arrow", "direct_spatial_attention"
+    elif category in {"sorting", "patterns"}:
+        mg_type, reason = "scan_line", "support_search_or_pattern_scan"
+    elif "scan" in fmt or lead == "bibo":
+        mg_type, reason = "scan_line", "match_bibo_scan_behavior"
+    elif category in {"science", "space", "positions", "numbers", "counting", "math"}:
+        mg_type, reason = "focus_brackets", "focus_teaching_target_at_reveal"
+    elif category in {"animals", "nature", "weather", "world", "transport", "community", "food", "safety", "seasons"}:
+        # Only some episodes need a graphical cue; preserve natural footage in the rest.
+        if h % 3 != 0:
+            mg_type, reason = "focus_brackets", "brief_reveal_focus"
+
+    # No third sound if typography already has a reveal cue; build_audio_filter enforces this too.
+    sfx = "tiny_whoosh" if mg_type in {"direction_arrow", "scan_line", "color_sweep"} else "none"
+    return {
+        "type": mg_type,
+        "reason": reason,
+        "accent": lesson_accent_color(payload, theme.get("accent", "0xFFD54A")),
+        "shape_symbol": shape_symbol_from_payload(payload),
+        "sfx": sfx,
+        "duration": MOTION_GRAPHICS_DURATION,
+        "entrance": MOTION_GRAPHICS_ENTRANCE,
+    }
 
 def build_motion_typography_plan(payload, edit_plan):
     """Deterministic text motion/SFX choices that stay subtle and episode-aware."""
@@ -907,7 +1002,7 @@ def build_camera_filter(chain_in, chain_out, mode, timing):
     )
 
 
-def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan):
+def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan, motion_graphics_plan):
     parts = [build_paced_video_prefix(pacing_plan)]
 
     eq_base = (
@@ -959,6 +1054,65 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         parts.append(f"[{chain}]{filter_text}[{nxt}];")
         chain = nxt
         idx += 1
+
+    # Contextual motion graphics: one short cue at most, centered on the reveal.
+    mg = motion_graphics_plan or {"type":"none"}
+    mg_type = mg.get("type", "none")
+    mg_st = max(0.0, timing["reveal"] - 0.05)
+    mg_en = min(duration, mg_st + float(mg.get("duration", MOTION_GRAPHICS_DURATION)))
+    grow = f"min(max((t-{mg_st:.3f})/{max(float(mg.get('entrance', MOTION_GRAPHICS_ENTRANCE)),0.05):.3f},0),1)"
+    accent = mg.get("accent") or theme["accent"]
+
+    if mg_type == "focus_brackets":
+        # Four restrained corner brackets frame the central teaching zone without covering it.
+        x0, y0, bw, bh, arm, thick = 236, 430, 608, 760, 78, 5
+        alpha = 0.46
+        # top-left
+        step(f"drawbox=x={x0}:y={y0}:w='{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0}:y={y0}:w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        # top-right
+        step(f"drawbox=x={x0+bw}:y={y0}:w='-{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw-thick}:y={y0}:w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        # bottom-left / bottom-right
+        step(f"drawbox=x={x0}:y={y0+bh}:w='{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0}:y='{y0+bh}-{arm}*{grow}':w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw}:y={y0+bh}:w='-{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw-thick}:y='{y0+bh}-{arm}*{grow}':w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+
+    elif mg_type == "direction_arrow":
+        arrow = "↔" if "left-right" in str(payload.get("lesson_key") or "") else "→"
+        ax = motion_slide_x(str(SAFE_LEFT + 8), mg_st, offset=-65, dur=0.24)
+        ay = OUTPUT_H - SAFE_BOTTOM - 210
+        step(
+            f"drawtext=fontfile={FONT}:text='{esc(arrow)}':fontcolor={accent}@0.78:fontsize=88:"
+            f"shadowx=2:shadowy=2:shadowcolor=black@0.22:x='{ax}':y={ay}:"
+            f"alpha='{fade_alpha(mg_st,mg_en,0.12)}'"
+        )
+
+    elif mg_type == "shape_badge" and mg.get("shape_symbol"):
+        symbol = esc(mg["shape_symbol"])
+        sy = motion_pop_y(OUTPUT_H - SAFE_BOTTOM - 220, mg_st, amp=16, dur=0.34)
+        step(
+            f"drawtext=fontfile={FONT}:text='{symbol}':fontcolor={accent}@0.82:fontsize=104:"
+            f"shadowx=2:shadowy=2:shadowcolor=black@0.20:x={SAFE_LEFT+16}:y='{sy}':"
+            f"alpha='{fade_alpha(mg_st,mg_en,0.14)}'"
+        )
+
+    elif mg_type == "color_sweep":
+        full_w = OUTPUT_W - SAFE_LEFT - SAFE_RIGHT
+        yy = OUTPUT_H - SAFE_BOTTOM - 54
+        step(
+            f"drawbox=x={SAFE_LEFT}:y={yy}:w='{full_w}*{grow}':h=12:"
+            f"color={accent}@0.62:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'"
+        )
+
+    elif mg_type == "scan_line":
+        scan_span = max(mg_en - mg_st, 0.25)
+        yy = f"520+650*min(max((t-{mg_st:.3f})/{scan_span:.3f},0),1)"
+        step(
+            f"drawbox=x=175:y='{yy}':w=730:h=4:color={accent}@0.36:t=fill:"
+            f"enable='between(t,{mg_st:.3f},{mg_en:.3f})'"
+        )
 
     if edit_plan["show_brand"]:
         step(f"drawbox=x={SAFE_LEFT}:y={SAFE_TOP}:w=176:h=48:color=black@0.20:t=fill")
@@ -1049,7 +1203,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
     return "".join(parts)
 
 
-def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan):
+def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan, motion_graphics_plan):
     parts = []
     if info["has_audio"]:
         parts.append(build_paced_audio_prefix(pacing_plan))
@@ -1107,6 +1261,12 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
         add_text_cue(motion_plan.get("opening_sfx"), timing["opening_start"], "open")
     if edit_plan.get("show_keyword"):
         add_text_cue(motion_plan.get("keyword_sfx"), timing["keyword_start"], "kw")
+
+    # Motion graphics share the reveal sound whenever typography already owns it.
+    # A separate tiny whoosh is allowed only when no keyword SFX is present.
+    mg_sfx = (motion_graphics_plan or {}).get("sfx", "none")
+    if mg_sfx != "none" and motion_plan.get("keyword_sfx", "none") == "none":
+        add_text_cue("soft_whoosh", timing["reveal"], "mg")
 
     if cue_labels:
         if len(cue_labels) == 1:
@@ -1215,6 +1375,7 @@ def edit_video(src, out, payload):
     timing = build_timing_plan(payload, source_duration, pacing_plan, silence_intervals)
     texts = build_text_plan(payload, edit_plan)
     motion_plan = build_motion_typography_plan(payload, edit_plan)
+    motion_graphics_plan = build_motion_graphics_plan(payload, edit_plan, theme)
     transition_plan = build_transition_plan(edit_plan)
 
     source_speech = complement_intervals(silence_intervals, source_duration)
@@ -1222,10 +1383,10 @@ def edit_video(src, out, payload):
     output_silences = map_intervals_to_output(silence_intervals, pacing_plan)
 
     vf = build_visual_filter(
-        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan
+        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan, motion_graphics_plan
     )
     af = build_audio_filter(
-        info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan
+        info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan, motion_graphics_plan
     )
 
     cmd = [
@@ -1253,6 +1414,7 @@ def edit_video(src, out, payload):
         "source_info": info,
         "texts": texts,
         "motion_typography_plan": motion_plan,
+        "motion_graphics_plan": motion_graphics_plan,
         "audio_plan": {
             "target_lufs": TARGET_LUFS,
             "target_true_peak_db": TARGET_TRUE_PEAK_DB,
@@ -1261,6 +1423,7 @@ def edit_video(src, out, payload):
             "dialogue_focus": bool(speech_windows and info["has_audio"]),
             "sfx_ducking": bool(motion_plan.get("opening_sfx") != "none" or motion_plan.get("keyword_sfx") != "none"),
             "text_sfx": {"opening": motion_plan.get("opening_sfx"), "keyword": motion_plan.get("keyword_sfx")},
+            "motion_graphics_sfx": motion_graphics_plan.get("sfx", "none"),
         },
     }
 
@@ -1309,6 +1472,7 @@ def main():
     meta["color_plan"] = result["color_plan"]
     meta["audio_plan"] = result["audio_plan"]
     meta["motion_typography_plan"] = result["motion_typography_plan"]
+    meta["motion_graphics_plan"] = result["motion_graphics_plan"]
     meta["edit_theme"] = result["theme"]
     meta["source_video_info"] = result["source_info"]
     meta["body_duration_after_speed"] = result["body_duration"]
