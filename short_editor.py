@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.8: Strong Kinetic Text + Retention Polish + 3s+ Brand Clips
+# KP Kids Short Editor V7.9: Strong Kinetic Text + Interactive Intro/Closure Options
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -24,6 +24,7 @@ import http.cookiejar
 import json
 import re
 import html
+import shutil
 import subprocess
 import tempfile
 import time
@@ -45,7 +46,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.8 Strong Kinetic Text + Retention Polish + 3s+ Brand Clips"
+EDITOR_VERSION = "V7.9 Strong Kinetic Text + Interactive Intro/Closure Options"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1685,6 +1686,28 @@ def main():
     payload = json.loads(base64.b64decode(args.payload_b64).decode("utf-8"))
     source_url = payload["video_url"]
 
+    def payload_bool(name, default=True):
+        value = payload.get(name, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", ""}:
+            return False
+        return bool(default)
+
+    include_intro = payload_bool("include_intro", True)
+    include_closure = payload_bool("include_closure", True)
+    edit_variant = str(payload.get("edit_variant") or (
+        "both" if include_intro and include_closure else
+        "intro" if include_intro else
+        "closure" if include_closure else
+        "none"
+    ))
+
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         src = td / "source.mp4"
@@ -1698,13 +1721,37 @@ def main():
         download(source_url, src)
         result = edit_video(src, edited_body, payload)
 
-        download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
-        normalize_intro(intro_raw, intro_norm, target_duration=INTRO_TARGET_SECONDS)
-        prepend_intro(intro_norm, edited_body, body_with_intro, xfade_dur=result["transition_plan"]["intro_xfade"])
+        # Brand clips are now controlled by the Telegram review choice.
+        # The Smart Edit body is ALWAYS rendered; intro/closure are optional.
+        if include_intro:
+            download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
+            normalize_intro(intro_raw, intro_norm, target_duration=INTRO_TARGET_SECONDS)
 
-        download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
-        normalize_intro(closure_raw, closure_norm, target_duration=CLOSURE_TARGET_SECONDS)
-        append_closure(body_with_intro, closure_norm, Path(args.output), xfade_dur=result["transition_plan"]["closure_xfade"])
+        if include_closure:
+            download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
+            normalize_intro(closure_raw, closure_norm, target_duration=CLOSURE_TARGET_SECONDS)
+
+        if include_intro and include_closure:
+            prepend_intro(
+                intro_norm, edited_body, body_with_intro,
+                xfade_dur=result["transition_plan"]["intro_xfade"]
+            )
+            append_closure(
+                body_with_intro, closure_norm, Path(args.output),
+                xfade_dur=result["transition_plan"]["closure_xfade"]
+            )
+        elif include_intro:
+            prepend_intro(
+                intro_norm, edited_body, Path(args.output),
+                xfade_dur=result["transition_plan"]["intro_xfade"]
+            )
+        elif include_closure:
+            append_closure(
+                edited_body, closure_norm, Path(args.output),
+                xfade_dur=result["transition_plan"]["closure_xfade"]
+            )
+        else:
+            shutil.copyfile(edited_body, Path(args.output))
 
     meta = dict(payload)
     meta["editor_version"] = EDITOR_VERSION
@@ -1728,10 +1775,11 @@ def main():
     meta["intro_target_seconds"] = INTRO_TARGET_SECONDS
     meta["closure_target_seconds"] = CLOSURE_TARGET_SECONDS
     meta["minimum_brand_clip_seconds"] = MIN_BRAND_CLIP_SECONDS
+    meta["edit_variant"] = edit_variant
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
-    meta["intro_prepend_enabled"] = True
+    meta["intro_prepend_enabled"] = include_intro
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
-    meta["closure_append_enabled"] = True
+    meta["closure_append_enabled"] = include_closure
     try:
         meta["final_output_info"] = ffprobe_video_info(Path(args.output))
     except Exception as e:
