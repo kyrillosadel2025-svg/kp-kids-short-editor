@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V6.0: Professional Human-Like Edit + Intro + Closure
-# V6.0 professional edit pass:
+# KP Kids Short Editor V7.0: Intelligent Human-Like Edit + Intro + Closure
+# V7.0 intelligent edit pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
-# - keeps 0.95x body pacing with synced audio/video; intro/closure remain normal speed.
+# - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
+# - keeps overall pacing near the old 0.95x target while intro/closure remain normal speed.
 # - uses direct 9:16 scaling when possible; blurred framing only as a fallback.
-# - ties reveal emphasis / optional SFX to lesson timing instead of fixed seconds.
-# - uses restrained overlays, safe zones, mild motion, and professional loudness control.
+# - ties reveal camera/color emphasis and optional SFX to real/metadata-derived edit points.
+# - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
+# - logs detailed pacing/audio/color/timing telemetry for future retention analysis.
 # - preserves robust Drive retry, intro/closure crossfades, payload and result metadata.
 
 import argparse
@@ -28,9 +30,16 @@ from pathlib import Path
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
-SHORT_PLAYBACK_SPEED = 0.95
+SHORT_PLAYBACK_SPEED = 0.95  # target overall body pace; individual sections vary intelligently
+SPEECH_BASE_SPEED = 0.99
+SHORT_PAUSE_SPEED = 0.96
+MEDIUM_PAUSE_SPEED = 0.93
+LONG_PAUSE_SPEED = 0.90
+MIN_PACING_SEGMENT = 0.08
+SILENCE_DB = -33
+SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V6.0 Professional Human-Like Edit"
+EDITOR_VERSION = "V7.0 Intelligent Human-Like Edit"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -443,36 +452,182 @@ def parse_timeline_event(timeline, keywords):
     return None
 
 
-def source_time_to_output_time(seconds):
+def detect_silence_intervals(path, duration):
+    """Detect real quiet windows from the source audio using FFmpeg silencedetect."""
+    info = ffprobe_video_info(path)
+    if not info["has_audio"] or duration <= 0:
+        return []
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-t", f"{duration:.3f}", "-i", str(path),
+        "-af", f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_MIN_DURATION}",
+        "-f", "null", "-"
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", text)]
+    ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", text)]
+    intervals = []
+    for i, st in enumerate(starts):
+        en = ends[i] if i < len(ends) else duration
+        st = max(0.0, min(st, duration))
+        en = max(st, min(en, duration))
+        if en - st >= SILENCE_MIN_DURATION - 0.01:
+            intervals.append((st, en))
+    # Merge overlapping/adjacent detections defensively.
+    merged = []
+    for st, en in sorted(intervals):
+        if merged and st <= merged[-1][1] + 0.03:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return merged
+
+
+def complement_intervals(intervals, duration):
+    """Return non-silent intervals over [0,duration]."""
+    out = []
+    cur = 0.0
+    for st, en in intervals:
+        if st > cur + MIN_PACING_SEGMENT:
+            out.append((cur, st))
+        cur = max(cur, en)
+    if duration > cur + MIN_PACING_SEGMENT:
+        out.append((cur, duration))
+    return out
+
+
+def _pause_speed(length):
+    if length >= 0.85:
+        return LONG_PAUSE_SPEED
+    if length >= 0.45:
+        return MEDIUM_PAUSE_SPEED
+    return SHORT_PAUSE_SPEED
+
+
+def build_pacing_plan(duration, silence_intervals):
+    """
+    Build deterministic A/V pacing segments.
+
+    Speech stays very close to natural speed, while real pauses breathe a little more.
+    Speeds are globally normalized so total duration stays close to the previous 0.95x
+    body target instead of growing unpredictably.
+    """
+    if duration <= 0:
+        return {"segments": [], "output_duration": 0.0, "target_duration": 0.0}
+
+    # Convert silence regions + complement into one ordered segmentation.
+    marks = {0.0, duration}
+    for st, en in silence_intervals:
+        marks.add(max(0.0, min(st, duration)))
+        marks.add(max(0.0, min(en, duration)))
+    marks = sorted(marks)
+    raw = []
+    for a, b in zip(marks, marks[1:]):
+        if b - a < MIN_PACING_SEGMENT:
+            continue
+        mid = (a + b) / 2.0
+        is_silence = any(st <= mid <= en for st, en in silence_intervals)
+        speed = _pause_speed(b-a) if is_silence else SPEECH_BASE_SPEED
+        raw.append({"source_start": a, "source_end": b, "kind": "silence" if is_silence else "speech", "speed": speed})
+
+    if not raw:
+        raw = [{"source_start": 0.0, "source_end": duration, "kind": "speech", "speed": SHORT_PLAYBACK_SPEED}]
+
+    target_duration = duration / SHORT_PLAYBACK_SPEED
+    current = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
+    factor = current / target_duration if target_duration > 0 else 1.0
+    for x in raw:
+        # Preserve the relationship (speech faster, pauses slower) while targeting the same overall duration.
+        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
+
+    # Recompute output timeline after clamping.
+    out_t = 0.0
+    segments = []
+    for x in raw:
+        seg = dict(x)
+        seg["output_start"] = out_t
+        seg_dur = (x["source_end"]-x["source_start"]) / x["speed"]
+        out_t += seg_dur
+        seg["output_end"] = out_t
+        segments.append(seg)
+
+    return {
+        "segments": segments,
+        "output_duration": out_t,
+        "target_duration": target_duration,
+        "silence_count": len(silence_intervals),
+    }
+
+
+def map_source_time_to_output(seconds, pacing_plan):
     try:
-        return max(0.0, float(seconds)) / SHORT_PLAYBACK_SPEED
+        t = max(0.0, float(seconds))
     except (TypeError, ValueError):
         return None
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return t / SHORT_PLAYBACK_SPEED
+    for seg in segs:
+        if t <= seg["source_end"] + 1e-6:
+            local = max(0.0, t - seg["source_start"])
+            return seg["output_start"] + local / seg["speed"]
+    return pacing_plan.get("output_duration", t / SHORT_PLAYBACK_SPEED)
 
 
-def build_timing_plan(payload, duration):
+def map_intervals_to_output(intervals, pacing_plan):
+    out = []
+    for st, en in intervals:
+        ost = map_source_time_to_output(st, pacing_plan)
+        oen = map_source_time_to_output(en, pacing_plan)
+        if ost is not None and oen is not None and oen > ost:
+            out.append((ost, oen))
+    return out
+
+
+def choose_event_from_silence(silence_intervals, duration, window_start, window_end):
+    """Use the end of a real pause as a natural edit point when metadata is missing."""
+    candidates = []
+    lo, hi = duration * window_start, duration * window_end
+    target = duration * ((window_start + window_end) / 2.0)
+    for st, en in silence_intervals:
+        mid = (st + en) / 2.0
+        if lo <= mid <= hi and en - st >= 0.28:
+            score = abs(mid-target) - min(en-st, 1.2) * 0.35
+            candidates.append((score, en + 0.05))
+    return min(candidates)[1] if candidates else None
+
+
+def build_timing_plan(payload, source_duration, pacing_plan, silence_intervals):
     timeline = payload.get("dialogue_timeline") or ""
-    reveal = payload.get("reveal_time")
-    interaction = payload.get("interaction_time")
-    if reveal is None:
-        reveal = parse_timeline_event(timeline, ["reveal", "answer", "correct", "result"])
-    if interaction is None:
-        interaction = parse_timeline_event(timeline, ["challenge", "viewer", "particip", "your turn", "response"])
-    reveal = source_time_to_output_time(reveal)
-    interaction = source_time_to_output_time(interaction)
+    reveal_src = payload.get("reveal_time")
+    interaction_src = payload.get("interaction_time")
+    if reveal_src is None:
+        reveal_src = parse_timeline_event(timeline, ["reveal", "answer", "correct", "result"])
+    if interaction_src is None:
+        interaction_src = parse_timeline_event(timeline, ["challenge", "viewer", "particip", "your turn", "response"])
+
+    # If metadata is unavailable, use genuine quiet windows as natural edit points.
+    if reveal_src is None:
+        reveal_src = choose_event_from_silence(silence_intervals, source_duration, 0.24, 0.58)
+    if interaction_src is None:
+        interaction_src = choose_event_from_silence(silence_intervals, source_duration, 0.58, 0.88)
+
+    duration = pacing_plan.get("output_duration") or source_duration / SHORT_PLAYBACK_SPEED
+    reveal = map_source_time_to_output(reveal_src, pacing_plan) if reveal_src is not None else None
+    interaction = map_source_time_to_output(interaction_src, pacing_plan) if interaction_src is not None else None
 
     if reveal is None:
         reveal = duration * 0.36
     if interaction is None:
         interaction = duration * 0.68
 
-    # Clamp safely for both normal 15s Shorts and unexpectedly short inputs.
     if duration < 6.0:
         reveal = min(max(reveal, duration * 0.28), max(duration * 0.62, 0.8))
         interaction = min(max(interaction, reveal + 0.45), max(reveal + 0.45, duration - 0.35))
     else:
         reveal = min(max(reveal, 2.6), duration - 2.4)
         interaction = min(max(interaction, reveal + 1.4), duration - 0.9)
+
     return {
         "opening_start": 0.18,
         "opening_end": min(1.65, max(0.9, reveal - 1.2)),
@@ -481,8 +636,9 @@ def build_timing_plan(payload, duration):
         "keyword_end": min(duration - 0.8, reveal + 1.15),
         "interaction": interaction,
         "fade_out_start": max(0.0, duration - 0.20),
+        "reveal_source_time": reveal_src,
+        "interaction_source_time": interaction_src,
     }
-
 
 def choose_editorial_style(payload):
     category = str(payload.get("category") or "").lower()
@@ -565,22 +721,102 @@ def is_near_vertical_9_16(width, height):
     return abs((width / height) - (9 / 16)) <= ASPECT_TOLERANCE
 
 
+def merge_intervals(intervals, gap=0.12):
+    merged = []
+    for st, en in sorted(intervals):
+        if merged and st <= merged[-1][1] + gap:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return merged
+
+
+def speech_enable_expr(speech_windows):
+    windows = merge_intervals(speech_windows, gap=0.10)
+    if not windows:
+        return None
+    terms = [f"between(t,{st:.3f},{en:.3f})" for st, en in windows[:18]]
+    return "+".join(terms)
+
+
+def category_color_plan(category):
+    """Subtle editorial color polish; never a heavy look/LUT."""
+    c = str(category or "").lower()
+    # Values intentionally conservative to preserve generated character identity/colors.
+    plans = {
+        "space":      {"contrast":1.028, "saturation":1.040, "gamma":0.995, "brightness":0.002},
+        "nature":     {"contrast":1.018, "saturation":1.045, "gamma":1.008, "brightness":0.004},
+        "weather":    {"contrast":1.018, "saturation":1.035, "gamma":1.006, "brightness":0.004},
+        "colors":     {"contrast":1.012, "saturation":1.050, "gamma":1.000, "brightness":0.002},
+        "emotions":   {"contrast":1.010, "saturation":1.025, "gamma":1.012, "brightness":0.004},
+        "body":       {"contrast":1.015, "saturation":1.020, "gamma":1.008, "brightness":0.003},
+        "safety":     {"contrast":1.025, "saturation":1.025, "gamma":1.000, "brightness":0.001},
+        "science":    {"contrast":1.024, "saturation":1.032, "gamma":1.000, "brightness":0.002},
+    }
+    return plans.get(c, {"contrast":1.018, "saturation":1.028, "gamma":1.004, "brightness":0.003})
+
+
+def build_transition_plan(edit_plan):
+    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
+    if style == "PLAYFUL_QUIZ":
+        return {"intro_xfade":0.16, "closure_xfade":0.22}
+    if style == "CALM_LEARNING":
+        return {"intro_xfade":0.24, "closure_xfade":0.32}
+    if style == "COUNT_AND_PLAY":
+        return {"intro_xfade":0.18, "closure_xfade":0.24}
+    if style == "STORY_MODE":
+        return {"intro_xfade":0.18, "closure_xfade":0.28}
+    return {"intro_xfade":0.20, "closure_xfade":0.26}
+
+
+def build_paced_video_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:v]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f}[pacedv];"
+    parts = []
+    labels = []
+    for i, seg in enumerate(segs):
+        label = f"pv{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:v]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"setpts=(PTS-STARTPTS)/{seg['speed']:.6f},settb=AVTB[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=1:a=0[pacedv];")
+    return "".join(parts)
+
+
+def build_paced_audio_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:a]atempo={SHORT_PLAYBACK_SPEED:.5f}[paceda];"
+    parts = []
+    labels = []
+    for i, seg in enumerate(segs):
+        label = f"pa{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:a]atrim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"asetpts=PTS-STARTPTS,atempo={seg['speed']:.6f}[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=0:a=1[paceda];")
+    return "".join(parts)
+
+
 def build_camera_filter(chain_in, chain_out, mode, timing):
     if mode == "STATIC":
         return f"[{chain_in}]null[{chain_out}];"
 
     if mode == "GENTLE_PUSH":
-        # Slow 1.8% push across the body: subtle enough not to feel like floating UI.
-        scale = "1+0.018*min(max(t/12,0),1)"
+        scale = "1+0.016*min(max(t/13,0),1)"
     else:
-        # A short emphasis centered on the actual reveal; no continuous motion outside it.
         r = timing["reveal"]
-        start = max(0.0, r - 0.30)
-        end = r + 0.70
+        start = max(0.0, r - 0.34)
+        end = r + 0.78
         span = max(end - start, 0.2)
         scale = (
             f"if(between(t,{start:.3f},{end:.3f}),"
-            f"1+0.024*sin(PI*(t-{start:.3f})/{span:.3f}),1)"
+            f"1+0.026*sin(PI*(t-{start:.3f})/{span:.3f}),1)"
         )
     return (
         f"[{chain_in}]scale=w='{OUTPUT_W}*({scale})':h='{OUTPUT_H}*({scale})':eval=frame[camz];"
@@ -588,21 +824,21 @@ def build_camera_filter(chain_in, chain_out, mode, timing):
     )
 
 
-def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme):
-    parts = []
-    # Pace adjustment first, preserving A/V sync with the audio chain.
-    parts.append(f"[0:v]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f}[pacedv];")
+def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan):
+    parts = [build_paced_video_prefix(pacing_plan)]
+
+    eq_base = (
+        f"eq=contrast={color_plan['contrast']:.3f}:saturation={color_plan['saturation']:.3f}:"
+        f"gamma={color_plan['gamma']:.3f}:brightness={color_plan['brightness']:.3f}"
+    )
 
     if is_near_vertical_9_16(info["width"], info["height"]):
-        # Native vertical source: keep it full-frame and clean. No blurred duplicate.
         parts.append(
             f"[pacedv]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUTPUT_W}:{OUTPUT_H},setsar=1,"
-            "eq=contrast=1.018:saturation=1.025:gamma=1.005,"
-            "unsharp=5:5:0.22:5:5:0.0[base];"
+            f"crop={OUTPUT_W}:{OUTPUT_H},setsar=1,{eq_base},"
+            "unsharp=5:5:0.20:5:5:0.0[base];"
         )
     else:
-        # Fallback only for mismatched aspect ratios.
         parts.append("[pacedv]split=2[bg][fg];")
         parts.append(
             f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
@@ -610,12 +846,24 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         )
         parts.append(
             f"[fg]scale={OUTPUT_W-80}:{OUTPUT_H-142}:force_original_aspect_ratio=decrease,"
-            "setsar=1,eq=contrast=1.018:saturation=1.025[fg2];"
+            f"setsar=1,{eq_base}[fg2];"
         )
         parts.append("[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base];")
 
+    # Gentle reveal color lift: a real editorial emphasis, not a glow/sticker effect.
+    reveal_st = max(0.0, timing["reveal"] - 0.12)
+    reveal_en = min(duration, timing["reveal"] + 0.70)
+    if edit_plan["style"] != "CALM_LEARNING":
+        parts.append(
+            f"[base]eq=contrast=1.010:saturation=1.040:brightness=0.006:"
+            f"enable='between(t,{reveal_st:.3f},{reveal_en:.3f})'[emph];"
+        )
+        base_label = "emph"
+    else:
+        base_label = "base"
+
     parts.append(
-        f"[base]fade=t=in:st=0:d=0.10,"
+        f"[{base_label}]fade=t=in:st=0:d=0.10,"
         f"fade=t=out:st={timing['fade_out_start']:.3f}:d=0.20,fps={OUTPUT_FPS}[clean];"
     )
     parts.append(build_camera_filter("clean", "cam", edit_plan["camera_mode"], timing))
@@ -629,17 +877,13 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         chain = nxt
         idx += 1
 
-    # Tiny quiet brand mark. It never occupies the main teaching area.
     if edit_plan["show_brand"]:
+        step(f"drawbox=x={SAFE_LEFT}:y={SAFE_TOP}:w=176:h=48:color=black@0.20:t=fill")
         step(
-            f"drawbox=x={SAFE_LEFT}:y={SAFE_TOP}:w=176:h=48:color=black@0.22:t=fill"
-        )
-        step(
-            f"drawtext=fontfile={FONT}:text='KP KIDS':fontcolor=white@0.88:fontsize=25:"
-            f"shadowx=1:shadowy=1:shadowcolor=black@0.35:x={SAFE_LEFT+20}:y={SAFE_TOP+10}"
+            f"drawtext=fontfile={FONT}:text='KP KIDS':fontcolor=white@0.86:fontsize=25:"
+            f"shadowx=1:shadowy=1:shadowcolor=black@0.32:x={SAFE_LEFT+20}:y={SAFE_TOP+10}"
         )
 
-    # One opening overlay only.
     opening_text = ""
     if edit_plan["opening"] == "topic":
         opening_text = texts["topic"]
@@ -647,21 +891,18 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         opening_text = texts["category"]
     if opening_text:
         st, en = timing["opening_start"], timing["opening_end"]
-        # Top-center chip within safe UI area, without a large black banner.
         box_w = min(730, max(330, 28 * len(opening_text) + 90))
         box_x = int((OUTPUT_W - box_w) / 2)
         step(
             f"drawbox=x={box_x}:y={SAFE_TOP+72}:w={box_w}:h=76:"
-            f"color={theme['box']}@0.54:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+            f"color={theme['box']}@0.48:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
         )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=38:"
-            f"shadowx=1:shadowy=1:shadowcolor=black@0.38:x=(w-text_w)/2:"
-            f"y='{soft_rise_y(SAFE_TOP+91, st, pixels=7)}':"
-            f"alpha='{fade_alpha(st,en)}'"
+            f"shadowx=1:shadowy=1:shadowcolor=black@0.34:x=(w-text_w)/2:"
+            f"y='{soft_rise_y(SAFE_TOP+91, st, pixels=6)}':alpha='{fade_alpha(st,en)}'"
         )
 
-    # Educational target keyword appears only when it genuinely clarifies the reveal.
     if edit_plan["show_keyword"] and texts["keyword"]:
         st, en = timing["keyword_start"], timing["keyword_end"]
         kw = texts["keyword"]
@@ -670,87 +911,97 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         y = SAFE_TOP + 190
         step(
             f"drawbox=x={box_x}:y={y}:w={box_w}:h=88:"
-            f"color={theme['accent']}@0.82:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+            f"color={theme['accent']}@0.78:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
         )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=46:"
-            f"shadowx=1:shadowy=1:shadowcolor=white@0.20:x=(w-text_w)/2:"
-            f"y='{soft_rise_y(y+20, st, pixels=6)}':alpha='{fade_alpha(st,en)}'"
+            f"shadowx=1:shadowy=1:shadowcolor=white@0.18:x=(w-text_w)/2:"
+            f"y='{soft_rise_y(y+20, st, pixels=5)}':alpha='{fade_alpha(st,en)}'"
         )
 
-    # Progress is meaningful only for count/pattern episodes.
     if edit_plan["use_progress"]:
         py = OUTPUT_H - SAFE_BOTTOM
-        step(f"drawbox=x={SAFE_LEFT}:y={py}:w=780:h=8:color=black@0.18:t=fill")
+        step(f"drawbox=x={SAFE_LEFT}:y={py}:w=780:h=8:color=black@0.16:t=fill")
         progress = f"(780*min(t/{max(duration,0.1):.3f},1))"
-        step(f"drawbox=x={SAFE_LEFT}:y={py}:w='{progress}':h=8:color={theme['accent']}@0.72:t=fill")
+        step(f"drawbox=x={SAFE_LEFT}:y={py}:w='{progress}':h=8:color={theme['accent']}@0.68:t=fill")
 
     parts.append(f"[{chain}]format=yuv420p[vout]")
     return "".join(parts)
 
 
-def build_audio_filter(info, duration, edit_plan, timing):
+def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows):
     parts = []
     if info["has_audio"]:
+        parts.append(build_paced_audio_prefix(pacing_plan))
+        speech_expr = speech_enable_expr(speech_windows)
+        dialogue_focus = ""
+        if speech_expr:
+            # Conservative mid/side focus during speech. In a mixed track this cannot isolate music,
+            # but it gently favors centered dialogue and reduces wide background energy.
+            dialogue_focus = f",stereotools=slev=0.88:mlev=1.045:enable='{speech_expr}'"
         parts.append(
-            f"[0:a]atempo={SHORT_PLAYBACK_SPEED:.5f},"
-            "aformat=sample_rates=48000:channel_layouts=stereo,"
+            "[paceda]aformat=sample_rates=48000:channel_layouts=stereo,"
             "highpass=f=70,lowpass=f=15500,"
-            "acompressor=threshold=-20dB:ratio=1.8:attack=15:release=180:makeup=1.0,"
+            "acompressor=threshold=-20dB:ratio=1.75:attack=15:release=180:makeup=1.0"
+            f"{dialogue_focus},"
             f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},"
             "alimiter=limit=0.94,"
             "afade=t=in:st=0:d=0.08,"
             f"afade=t=out:st={max(0.0,duration-0.18):.3f}:d=0.18[amain];"
         )
     else:
-        parts.append(
-            f"anullsrc=r=48000:cl=stereo:d={duration:.3f},asetpts=PTS-STARTPTS[amain];"
-        )
+        parts.append(f"anullsrc=r=48000:cl=stereo:d={duration:.3f},asetpts=PTS-STARTPTS[amain];")
 
     if edit_plan["use_reveal_sfx"]:
-        # One quiet, event-tied two-note cue. No fixed mobile-game chimes.
         delay = int(max(0.0, timing["reveal"] - 0.03) * 1000)
         delay2 = delay + 85
         parts.append(
             "sine=frequency=660:sample_rate=48000:duration=0.09,"
             "afade=t=in:st=0:d=0.012,afade=t=out:st=0.045:d=0.04,"
-            f"volume=0.0065,adelay={delay}|{delay}[sfx1];"
+            f"volume=0.0062,adelay={delay}|{delay}[sfx1];"
         )
         parts.append(
             "sine=frequency=880:sample_rate=48000:duration=0.10,"
             "afade=t=in:st=0:d=0.012,afade=t=out:st=0.05:d=0.04,"
-            f"volume=0.0055,adelay={delay2}|{delay2}[sfx2];"
+            f"volume=0.0052,adelay={delay2}|{delay2}[sfx2];"
         )
-        parts.append("[amain][sfx1][sfx2]amix=inputs=3:normalize=0:duration=first[aout]")
+        # Duck the tiny SFX under whatever is already happening in the main mix.
+        parts.append("[sfx1][sfx2]amix=inputs=2:normalize=0:duration=longest[sfxraw];")
+        parts.append("[amain]asplit=2[amainmix][side];")
+        parts.append(
+            "[sfxraw][side]sidechaincompress=threshold=0.045:ratio=8:attack=4:release=100:mix=1[sfxduck];"
+        )
+        parts.append("[amainmix][sfxduck]amix=inputs=2:normalize=0:duration=first[aout]")
     else:
         parts.append("[amain]anull[aout]")
     return "".join(parts)
-
 
 def normalize_intro(src, dest):
     """Normalize intro/closure to exact output format; speed is NOT changed."""
     info = ffprobe_video_info(src)
     cmd = ["ffmpeg", "-y", "-i", str(src)]
+    if not info["has_audio"]:
+        cmd += [
+            "-f", "lavfi", "-i",
+            f"anullsrc=r=48000:cl=stereo:d={max(info['duration'],0.1):.3f}"
+        ]
+
     cmd += [
+        "-map", "0:v:0",
+        "-map", "0:a:0" if info["has_audio"] else "1:a:0",
         "-vf",
         f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
         f"crop={OUTPUT_W}:{OUTPUT_H},fps={OUTPUT_FPS},setsar=1,format=yuv420p",
-    ]
-    if info["has_audio"]:
-        cmd += [
-            "-af", "aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1:first_pts=0"
-        ]
-    else:
-        # Add silence so crossfades remain robust even if a branding clip has no audio stream.
-        cmd += ["-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={max(info['duration'],0.1):.3f}", "-shortest"]
-    cmd += [
+        "-af",
+        f"aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1:first_pts=0,"
+        f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},alimiter=limit=0.94",
+        "-shortest",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(dest),
     ]
     run(cmd)
-
 
 def prepend_intro(intro, body, output, xfade_dur=0.28):
     """Subtle intro-to-story dissolve; kept short so the generated hook stays energetic."""
@@ -806,14 +1057,28 @@ def append_closure(body_with_intro, closure, output, xfade_dur=0.30):
 def edit_video(src, out, payload):
     info = ffprobe_video_info(src)
     source_duration = min(15.0, info["duration"] or 15.0)
-    duration = source_duration / SHORT_PLAYBACK_SPEED
-    theme = category_theme(payload.get("category"))
-    edit_plan = build_edit_plan(payload, duration)
-    timing = build_timing_plan(payload, duration)
-    texts = build_text_plan(payload, edit_plan)
 
-    vf = build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme)
-    af = build_audio_filter(info, duration, edit_plan, timing)
+    silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+    pacing_plan = build_pacing_plan(source_duration, silence_intervals)
+    duration = pacing_plan["output_duration"] or source_duration / SHORT_PLAYBACK_SPEED
+
+    theme = category_theme(payload.get("category"))
+    color_plan = category_color_plan(payload.get("category"))
+    edit_plan = build_edit_plan(payload, duration)
+    timing = build_timing_plan(payload, source_duration, pacing_plan, silence_intervals)
+    texts = build_text_plan(payload, edit_plan)
+    transition_plan = build_transition_plan(edit_plan)
+
+    source_speech = complement_intervals(silence_intervals, source_duration)
+    speech_windows = map_intervals_to_output(source_speech, pacing_plan)
+    output_silences = map_intervals_to_output(silence_intervals, pacing_plan)
+
+    vf = build_visual_filter(
+        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan
+    )
+    af = build_audio_filter(
+        info, duration, edit_plan, timing, pacing_plan, speech_windows
+    )
 
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
@@ -829,12 +1094,25 @@ def edit_video(src, out, payload):
         "editorial_style": edit_plan["style"],
         "edit_plan": edit_plan,
         "timing_plan": timing,
+        "transition_plan": transition_plan,
+        "pacing_plan": pacing_plan,
+        "source_silence_intervals": silence_intervals,
+        "output_silence_intervals": output_silences,
+        "output_speech_intervals": speech_windows,
+        "color_plan": color_plan,
         "theme": theme,
         "body_duration": duration,
         "source_info": info,
         "texts": texts,
+        "audio_plan": {
+            "target_lufs": TARGET_LUFS,
+            "target_true_peak_db": TARGET_TRUE_PEAK_DB,
+            "silence_threshold_db": SILENCE_DB,
+            "silence_min_duration": SILENCE_MIN_DURATION,
+            "dialogue_focus": bool(speech_windows and info["has_audio"]),
+            "sfx_ducking": bool(edit_plan["use_reveal_sfx"]),
+        },
     }
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -860,18 +1138,26 @@ def main():
 
         download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
         normalize_intro(intro_raw, intro_norm)
-        prepend_intro(intro_norm, edited_body, body_with_intro)
+        prepend_intro(intro_norm, edited_body, body_with_intro, xfade_dur=result["transition_plan"]["intro_xfade"])
 
         download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
         normalize_intro(closure_raw, closure_norm)
-        append_closure(body_with_intro, closure_norm, Path(args.output))
+        append_closure(body_with_intro, closure_norm, Path(args.output), xfade_dur=result["transition_plan"]["closure_xfade"])
 
     meta = dict(payload)
     meta["editor_version"] = EDITOR_VERSION
     meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
+    meta["pacing_mode"] = "silence_aware_variable_speed"
     meta["editorial_style"] = result["editorial_style"]
     meta["edit_plan"] = result["edit_plan"]
     meta["timing_plan"] = result["timing_plan"]
+    meta["transition_plan"] = result["transition_plan"]
+    meta["pacing_plan"] = result["pacing_plan"]
+    meta["source_silence_intervals"] = result["source_silence_intervals"]
+    meta["output_silence_intervals"] = result["output_silence_intervals"]
+    meta["output_speech_intervals"] = result["output_speech_intervals"]
+    meta["color_plan"] = result["color_plan"]
+    meta["audio_plan"] = result["audio_plan"]
     meta["edit_theme"] = result["theme"]
     meta["source_video_info"] = result["source_info"]
     meta["body_duration_after_speed"] = result["body_duration"]
@@ -879,6 +1165,10 @@ def main():
     meta["intro_prepend_enabled"] = True
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
     meta["closure_append_enabled"] = True
+    try:
+        meta["final_output_info"] = ffprobe_video_info(Path(args.output))
+    except Exception as e:
+        meta["final_output_info"] = {"probe_error": str(e)}
     Path("edit_result.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
