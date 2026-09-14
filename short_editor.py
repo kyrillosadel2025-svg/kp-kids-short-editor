@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.4: Intelligent Edit + Clean Motion Text + Contextual Graphics + Intro + Closure
-# V7.4 motion-graphics typography pass:
+# KP Kids Short Editor V7.5: Intelligent Edit + Long-Hold Motion Text + Audible SFX + Intro + Closure
+# V7.5 long-hold motion typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
@@ -11,10 +11,9 @@
 # - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
 # - logs detailed pacing/audio/color/timing telemetry for future retention analysis.
 # - preserves robust Drive retry, intro/closure crossfades, payload and result metadata.
-# - upgrades text to true motion graphics: animated plates, accent wipes, impact flashes, settle motion, and synchronized SFX.
-# - synchronizes tiny generated SFX with text entrances and ducks them under dialogue.
+# - upgrades text to readable motion cards: animated panels, clear entrance motion, stable hold, soft exit, and synchronized SFX.
+# - synchronizes audible-but-gentle generated SFX with text entrances and ducks them under dialogue.
 # - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
-# - adds one contextual motion-graphic cue at most, selected from lesson/category metadata.
 # - contextual scene overlays removed: motion design is now limited to typography only.
 # - avoids decorative particle fields, confetti, random squares, and persistent HUD clutter.
 
@@ -45,7 +44,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.4 Intelligent Edit + Clean Motion Text + Contextual Motion Graphics"
+EDITOR_VERSION = "V7.5 Intelligent Edit + Long-Hold Motion Text + Audible SFX"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -58,11 +57,16 @@ OUTPUT_W = 1080
 OUTPUT_H = 1920
 OUTPUT_FPS = 24
 
-TEXT_MOTION_DURATION = 0.32
-TEXT_BOUNCE_DURATION = 0.40
-TEXT_PANEL_DURATION = 0.30
-TEXT_ACCENT_DURATION = 0.38
-TEXT_SFX_MAX_GAIN = 0.0062
+TEXT_MOTION_DURATION = 0.46
+TEXT_BOUNCE_DURATION = 0.48
+TEXT_PANEL_DURATION = 0.42
+TEXT_ACCENT_DURATION = 0.46
+TEXT_SFX_MAX_GAIN = 0.0280
+TEXT_OPENING_MIN_HOLD = 2.60
+TEXT_OPENING_MAX_HOLD = 3.20
+TEXT_KEYWORD_MIN_HOLD = 2.45
+TEXT_KEYWORD_MAX_HOLD = 3.00
+TEXT_EXIT_FADE = 0.30
 MOTION_GRAPHICS_DURATION = 0.90
 MOTION_GRAPHICS_ENTRANCE = 0.22
 MOTION_GRAPHICS_MAX_ALPHA = 0.55
@@ -393,7 +397,7 @@ def motion_panel_x(center_x, width, start, dur=TEXT_PANEL_DURATION, start_scale=
     return f"({center_x}-({w})/2)"
 
 
-def entrance_only_alpha(start, dur=0.30, peak=0.65):
+def entrance_only_alpha(start, dur=0.42, peak=0.65):
     """Quick glow/outline flash that disappears once the title settles."""
     return (
         f"if(lt(t,{start:.3f}),0,"
@@ -810,16 +814,34 @@ def build_timing_plan(payload, source_duration, pacing_plan, silence_intervals):
         reveal = min(max(reveal, 2.6), duration - 2.4)
         interaction = min(max(interaction, reveal + 1.4), duration - 0.9)
 
+    # Long-hold child-readable typography. Motion happens quickly, then the text
+    # remains still long enough to actually read. Longer labels get a little more hold time.
+    opening_text = clean_topic(payload.get("topic") or payload.get("title") or "")
+    keyword_text = keyword_from_lesson(payload) or ""
+    opening_hold = min(TEXT_OPENING_MAX_HOLD, TEXT_OPENING_MIN_HOLD + max(0, len(opening_text) - 10) * 0.025)
+    keyword_hold = min(TEXT_KEYWORD_MAX_HOLD, TEXT_KEYWORD_MIN_HOLD + max(0, len(keyword_text) - 7) * 0.035)
+
+    opening_start = 0.22
+    # Keep the opening card comfortably clear of the reveal card when possible.
+    opening_end = min(duration - 1.0, opening_start + opening_hold, max(opening_start + 1.8, reveal - 0.38))
+    keyword_start = max(0.0, reveal - 0.06)
+    keyword_end = min(duration - 0.85, keyword_start + keyword_hold)
+    # If interaction begins very early, retain at least two seconds of readable keyword time.
+    if interaction > keyword_start + 2.0:
+        keyword_end = min(keyword_end, max(keyword_start + 2.0, interaction - 0.20))
+
     return {
-        "opening_start": 0.18,
-        "opening_end": min(1.65, max(0.9, reveal - 1.2)),
+        "opening_start": opening_start,
+        "opening_end": opening_end,
         "reveal": reveal,
-        "keyword_start": max(0.0, reveal - 0.08),
-        "keyword_end": min(duration - 0.8, reveal + 1.15),
+        "keyword_start": keyword_start,
+        "keyword_end": keyword_end,
         "interaction": interaction,
         "fade_out_start": max(0.0, duration - 0.20),
         "reveal_source_time": reveal_src,
         "interaction_source_time": interaction_src,
+        "opening_hold_seconds": max(0.0, opening_end - opening_start),
+        "keyword_hold_seconds": max(0.0, keyword_end - keyword_start),
     }
 
 def choose_editorial_style(payload):
@@ -1144,11 +1166,11 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         text_x = "(w-text_w)/2"
         text_y = str(base_y + 21)
         if motion == "title_slide_left":
-            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=-96, dur=0.30)
+            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=-96, dur=0.42)
         elif motion == "title_slide_right":
-            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=96, dur=0.30)
+            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=96, dur=0.42)
         else:
-            text_y = motion_rise_y(base_y + 21, st + 0.04, pixels=18, dur=0.30)
+            text_y = motion_rise_y(base_y + 21, st + 0.04, pixels=18, dur=0.42)
 
         # soft shadow plate grows from the center
         step(
@@ -1158,7 +1180,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         step(
             f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=40:"
             f"shadowx=2:shadowy=2:shadowcolor=black@0.38:x='{text_x}':y='{text_y}':"
-            f"alpha='{fade_alpha(st,en,0.14)}'"
+            f"alpha='{fade_alpha(st,en,TEXT_EXIT_FADE)}'"
         )
 
     # IMPACT KEYWORD: center-expanding panel + one text overshoot; no decorative lines.
@@ -1175,7 +1197,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         if motion == "impact_pop":
             text_y = motion_pop_y(base_y + 23, st + 0.02, amp=18, dur=TEXT_BOUNCE_DURATION)
         else:
-            text_y = motion_rise_y(base_y + 23, st + 0.02, pixels=14, dur=0.30)
+            text_y = motion_rise_y(base_y + 23, st + 0.02, pixels=14, dur=0.42)
 
         step(
             f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
@@ -1184,7 +1206,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         step(
             f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=49:"
             f"shadowx=1:shadowy=2:shadowcolor=white@0.20:x=(w-text_w)/2:y='{text_y}':"
-            f"alpha='{fade_alpha(st,en,0.12)}'"
+            f"alpha='{fade_alpha(st,en,TEXT_EXIT_FADE)}'"
         )
 
     if edit_plan["use_progress"]:
@@ -1236,12 +1258,12 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
                 "anoisesrc=color=white:sample_rate=48000:duration=0.19,"
                 "highpass=f=700,lowpass=f=3900,"
                 "afade=t=in:st=0:d=0.015,afade=t=out:st=0.085:d=0.095,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0046):.4f},adelay={delay}|{delay}[{nlab}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0180):.4f},adelay={delay}|{delay}[{nlab}];"
             )
             parts.append(
                 "sine=frequency=720:sample_rate=48000:duration=0.11,"
                 "afade=t=in:st=0:d=0.010,afade=t=out:st=0.045:d=0.060,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0024):.4f},adelay={delay+55}|{delay+55}[{tlab}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0090):.4f},adelay={delay+55}|{delay+55}[{tlab}];"
             )
             parts.append(f"[{nlab}][{tlab}]amix=inputs=2:normalize=0:duration=longest[{label}];")
 
@@ -1252,12 +1274,12 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
             parts.append(
                 "sine=frequency=430:sample_rate=48000:duration=0.10,"
                 "afade=t=in:st=0:d=0.006,afade=t=out:st=0.035:d=0.060,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0052):.4f},adelay={delay}|{delay}[{plab}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0220):.4f},adelay={delay}|{delay}[{plab}];"
             )
             parts.append(
                 "sine=frequency=1180:sample_rate=48000:duration=0.13,"
                 "afade=t=in:st=0:d=0.010,afade=t=out:st=0.050:d=0.075,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0036):.4f},adelay={delay+42}|{delay+42}[{dlab}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0130):.4f},adelay={delay+42}|{delay+42}[{dlab}];"
             )
             parts.append(f"[{plab}][{dlab}]amix=inputs=2:normalize=0:duration=longest[{label}];")
 
@@ -1265,13 +1287,13 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
             parts.append(
                 "sine=frequency=540:sample_rate=48000:duration=0.085,"
                 "afade=t=in:st=0:d=0.008,afade=t=out:st=0.035:d=0.045,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0046):.4f},adelay={delay}|{delay}[{label}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0180):.4f},adelay={delay}|{delay}[{label}];"
             )
         else:  # soft_ding
             parts.append(
                 "sine=frequency=1046:sample_rate=48000:duration=0.12,"
                 "afade=t=in:st=0:d=0.010,afade=t=out:st=0.050:d=0.065,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0042):.4f},adelay={delay}|{delay}[{label}];"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0140):.4f},adelay={delay}|{delay}[{label}];"
             )
         cue_labels.append(f"[{label}]")
 
@@ -1352,7 +1374,7 @@ def prepend_intro(intro, body, output, xfade_dur=0.28):
     run(cmd)
 
 
-def append_closure(body_with_intro, closure, output, xfade_dur=0.30):
+def append_closure(body_with_intro, closure, output, xfade_dur=0.42):
     """Append the fixed closure with one clean transition, no redundant body end-card."""
     main_dur = ffprobe_duration(body_with_intro)
     closure_dur = ffprobe_duration(closure)
