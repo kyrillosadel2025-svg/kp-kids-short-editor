@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V5.5: Smart Kids Edit + Intro + Closure + Robust Drive Retry
-# V5.2 polish pass: smooth alpha fades on all on-screen text (no more hard pop
-# in/out), a real crossfade between the intro and the Short instead of a hard
-# cut, the topic line now actually renders (was computed but never drawn),
-# and the two UI chime tones are lightly enveloped so they don't click.
-# V5.3 kid-fun pass: bouncy "boing" pop-ins on every text element instead of
-# a flat fade, a playful wiggle on the keyword highlight, a scattered field
-# of twinkling confetti squares throughout the clip, a celebratory sparkle
-# burst around the end card, and the chimes are now a 2-note "sparkle" cue
-# plus a 3-note rising "ta-da!" instead of two flat beeps. Also fixed a
-# latent filtergraph bug where the audio chain reused the video chain's
-# [a0]/[c1] labels (ffmpeg requires every pad label to be globally unique).
+# KP Kids Short Editor V5.6: Smart Kids Edit + Intro + Closure + Gentle 0.95x Pace
+# V5.6 pacing/clean-visual pass:
+# - slows the GENERATED SHORT body to 0.95x, with video and audio slowed together
+#   so lip-sync stays aligned; intro/closure remain at normal speed.
+# - removes all tiny square/confetti overlays, decorative square accents, and
+#   end-card square sparkle bursts so the generated scene stays visually clean.
+# - keeps the existing text, branding, progress bar, chimes, intro/closure,
+#   Google Drive retry logic, and technical output settings.
 
 import argparse
 import base64
@@ -31,6 +27,7 @@ from pathlib import Path
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
+SHORT_PLAYBACK_SPEED = 0.95
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -286,44 +283,6 @@ def bounce_offset(start, amp=16.0, dur=0.32, freq=15.0):
         f"{amp:.1f}*exp(-9*(t-{start:.3f}))*cos({freq:.1f}*(t-{start:.3f})))"
     )
 
-def build_confetti(chain_in, specs, prefix):
-    """
-    Chain a handful of tiny squares onto `chain_in` that twinkle on and off
-    forever on their own repeating cycle, like a scattered field of
-    confetti/sparkles. Each spec is (x, y, size, color, phase, period,
-    on_frac). Keep specs near the frame edges so they never compete with the
-    hook/caption/keyword text for attention.
-    """
-    parts = []
-    label = chain_in
-    for idx, (x, y, size, color, phase, period, on_frac) in enumerate(specs):
-        nxt = f"{prefix}{idx}"
-        on_dur = period * on_frac
-        parts.append(
-            f"[{label}]drawbox=x={x}:y={y}:w={size}:h={size}:color={color}@0.85:t=fill:"
-            f"enable='lt(mod(t+{phase:.2f},{period:.2f}),{on_dur:.2f})'[{nxt}];"
-        )
-        label = nxt
-    return "".join(parts), label
-
-def build_sparkle_burst(chain_in, specs, prefix, final_label=None):
-    """
-    Chain a handful of tiny squares onto `chain_in` that each flash once
-    inside their own (t0, t1) window, used for a one-off celebratory burst
-    around the end card rather than a continuous twinkle.
-    """
-    parts = []
-    label = chain_in
-    n = len(specs)
-    for idx, (x, y, size, color, t0, t1) in enumerate(specs):
-        nxt = final_label if (final_label and idx == n - 1) else f"{prefix}{idx}"
-        parts.append(
-            f"[{label}]drawbox=x={x}:y={y}:w={size}:h={size}:color={color}@0.92:t=fill:"
-            f"enable='between(t,{t0:.2f},{t1:.2f})'[{nxt}];"
-        )
-        label = nxt
-    return "".join(parts), label
-
 def style_from_id(short_id):
     digest = hashlib.sha256(str(short_id).encode("utf-8")).digest()
     return digest[0] % 6
@@ -548,7 +507,8 @@ def edit_video(src, out, payload):
     keyword_text = keyword_from_topic(topic, category)
     style = style_from_id(short_id)
     theme = category_theme(category)
-    duration = min(15.0, ffprobe_duration(src))
+    source_duration = min(15.0, ffprobe_duration(src))
+    duration = source_duration / SHORT_PLAYBACK_SPEED
 
     hook = category_label(category)[:28]
     topic_text = topic.replace("#Shorts", "").strip()[:34]
@@ -601,7 +561,6 @@ def edit_video(src, out, payload):
 
     # Main effect timings
     intro_start, intro_end = 0.0, 2.0
-    accent_start, accent_end = 5.0, 6.0
     end_start = max(0.0, duration - 1.9)
 
     # Progress bar width expression based on time
@@ -631,30 +590,8 @@ def edit_video(src, out, payload):
     keyword_start = 5.15
     keyword_end = min(6.35, max(5.75, duration - 3.5))
 
-    # Scattered confetti/sparkle field: small squares near the frame edges
-    # that twinkle on a repeating cycle for the whole clip.
-    twinkle_specs = [
-        (46, 260, 20, theme["accent"], 0.05, 1.6, 0.35),
-        (1006, 320, 16, "white", 0.40, 1.9, 0.30),
-        (50, 700, 18, theme["box"], 0.90, 1.7, 0.32),
-        (996, 760, 22, theme["accent"], 1.30, 2.1, 0.28),
-        (48, 1150, 16, "white", 0.60, 1.5, 0.35),
-        (998, 1620, 20, theme["box"], 1.10, 1.8, 0.30),
-    ]
-    twinkle_vf, twinkle_out = build_confetti("a1", twinkle_specs, "tw")
-
-    # One-off celebratory sparkle burst timed to pop around the end card.
-    burst_specs = [
-        (100, 96, 16, "white", end_start + 0.05, min(duration - 0.02, end_start + 0.40)),
-        (60, 210, 14, theme["accent"], end_start + 0.25, min(duration - 0.02, end_start + 0.60)),
-        (990, 100, 16, theme["accent"], end_start + 0.15, min(duration - 0.02, end_start + 0.55)),
-        (950, 220, 14, "white", end_start + 0.40, min(duration - 0.02, end_start + 0.80)),
-        (520, 60, 12, theme["box"], end_start + 0.55, min(duration - 0.02, end_start + 0.95)),
-    ]
-    burst_vf, _ = build_sparkle_burst("etxt", burst_specs, "sp", final_label="vout")
-
     vf = (
-        "[0:v]split=2[bg][fg];"
+        f"[0:v]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f},split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,gblur=sigma=32,eq=brightness=-0.045:contrast=1.04:saturation=1.08[bg2];"
         "[fg]scale=1000:1778:force_original_aspect_ratio=decrease,"
@@ -713,18 +650,8 @@ def edit_video(src, out, payload):
         f"y='278+{bounce_offset(keyword_start, amp=14.0)}':"
         f"alpha='{fade_alpha(keyword_start, keyword_end)}'[k1];"
 
-        # light decorative accents
-        f"[k1]drawbox=x=118:y=240:w=34:h=34:color={theme['accent']}@0.72:t=fill:"
-        f"enable='between(t,{accent_start},{accent_end})'[a0];"
-        f"[a0]drawbox=x=930:y=286:w=20:h=20:color=white@0.65:t=fill:"
-        f"enable='between(t,{accent_start},{accent_end})'[a1];"
-
-        # scattered confetti/sparkle field along the edges, twinkling on and
-        # off for the whole clip so the frame always feels a little alive
-        f"{twinkle_vf}"
-
-        # progress bar
-        f"[{twinkle_out}]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
+        # progress bar — clean and minimal, with no decorative square overlays
+        f"[k1]drawbox=x=55:y={progress_y}:w=970:h=12:color=black@0.24:t=fill[p0];"
         f"[p0]drawbox=x=55:y={progress_y}:w='{progress_expr}':h=12:color={theme['accent']}@0.92:t=fill[p1];"
 
         # end card
@@ -735,10 +662,7 @@ def edit_video(src, out, payload):
         f"[e1]drawtext=fontfile={FONT}:text='{esc(end_text)}':fontcolor=white:fontsize=58:"
         "borderw=1:bordercolor=black@0.18:shadowx=3:shadowy=3:shadowcolor=black@0.50:"
         f"x=(w-text_w)/2:y='153+{bounce_offset(end_start, amp=18.0)}':"
-        f"alpha='{fade_alpha(end_start, duration)}'[etxt];"
-
-        # celebratory sparkle burst around the end card
-        f"{burst_vf}"
+        f"alpha='{fade_alpha(end_start, duration)}'[vout]"
     )
     vf = vf.rstrip(";")
 
@@ -757,7 +681,8 @@ def edit_video(src, out, payload):
     audio_fade_out = max(0.0, duration - 0.22)
 
     af = (
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+        f"[0:a]atempo={SHORT_PLAYBACK_SPEED:.5f},"
+        "aformat=sample_rates=48000:channel_layouts=stereo,"
         "highpass=f=70,lowpass=f=15000,"
         "acompressor=threshold=-18dB:ratio=2.2:attack=12:release=180:makeup=1.4,"
         "alimiter=limit=0.96,"
@@ -847,7 +772,9 @@ def main():
     meta = dict(payload)
     meta["edit_style"] = result["style"]
     meta["edit_theme"] = result["theme"]
-    meta["editor_version"] = "V5.5 Smart Kids Edit + KP Kids Intro + Closure + Drive Retry"
+    meta["editor_version"] = "V5.6 Smart Kids Edit + 0.95x Short Pace + Clean Visuals + Intro + Closure"
+    meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
+    meta["small_square_overlays_enabled"] = False
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
