@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.2: Intelligent Human-Like Edit + Contextual Motion Graphics + Intro + Closure
-# V7.2 contextual motion-graphics pass:
+# KP Kids Short Editor V7.3: Intelligent Edit + Motion Graphics Text + Contextual Graphics + Intro + Closure
+# V7.3 motion-graphics typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
@@ -11,7 +11,7 @@
 # - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
 # - logs detailed pacing/audio/color/timing telemetry for future retention analysis.
 # - preserves robust Drive retry, intro/closure crossfades, payload and result metadata.
-# - adds restrained motion typography: short purposeful entrances, then stable readable text.
+# - upgrades text to true motion graphics: animated plates, accent wipes, impact flashes, settle motion, and synchronized SFX.
 # - synchronizes tiny generated SFX with text entrances and ducks them under dialogue.
 # - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
 # - adds one contextual motion-graphic cue at most, selected from lesson/category metadata.
@@ -45,7 +45,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.2 Intelligent Human-Like Edit + Contextual Motion Graphics"
+EDITOR_VERSION = "V7.3 Intelligent Edit + Motion Graphics Text + Contextual Motion Graphics"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -58,9 +58,11 @@ OUTPUT_W = 1080
 OUTPUT_H = 1920
 OUTPUT_FPS = 24
 
-TEXT_MOTION_DURATION = 0.26
-TEXT_BOUNCE_DURATION = 0.34
-TEXT_SFX_MAX_GAIN = 0.0055
+TEXT_MOTION_DURATION = 0.32
+TEXT_BOUNCE_DURATION = 0.40
+TEXT_PANEL_DURATION = 0.30
+TEXT_ACCENT_DURATION = 0.38
+TEXT_SFX_MAX_GAIN = 0.0062
 MOTION_GRAPHICS_DURATION = 0.90
 MOTION_GRAPHICS_ENTRANCE = 0.22
 MOTION_GRAPHICS_MAX_ALPHA = 0.55
@@ -370,6 +372,36 @@ def motion_pop_y(base_y, start, amp=15.0, dur=TEXT_BOUNCE_DURATION):
     )
 
 
+def motion_unit(start, dur):
+    """0..1 linear progress expression clipped to the entrance window."""
+    return f"min(max((t-{start:.3f})/{max(dur,0.05):.3f},0),1)"
+
+
+def motion_ease_out(start, dur):
+    """Quadratic ease-out used by card/underline motion."""
+    u = motion_unit(start, dur)
+    return f"(1-(1-{u})*(1-{u}))"
+
+
+def motion_panel_width(width, start, dur=TEXT_PANEL_DURATION, start_scale=0.68):
+    p = motion_ease_out(start, dur)
+    return f"({width}*({start_scale:.3f}+(1-{start_scale:.3f})*{p}))"
+
+
+def motion_panel_x(center_x, width, start, dur=TEXT_PANEL_DURATION, start_scale=0.68):
+    w = motion_panel_width(width, start, dur, start_scale)
+    return f"({center_x}-({w})/2)"
+
+
+def entrance_only_alpha(start, dur=0.30, peak=0.65):
+    """Quick glow/outline flash that disappears once the title settles."""
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+dur/2:.3f}),{peak:.3f}*(t-{start:.3f})/{dur/2:.3f},"
+        f"if(lt(t,{start+dur:.3f}),{peak:.3f}*({start+dur:.3f}-t)/{dur/2:.3f},0)))"
+    )
+
+
 def lesson_accent_color(payload, fallback="0xFFD54A"):
     """Return a lesson-specific accent when the lesson itself names a color."""
     key = str(payload.get("lesson_key") or "").lower()
@@ -460,37 +492,38 @@ def build_motion_graphics_plan(payload, edit_plan, theme):
     }
 
 def build_motion_typography_plan(payload, edit_plan):
-    """Deterministic text motion/SFX choices that stay subtle and episode-aware."""
+    """Build true motion-graphics text behavior: animated card + accent + title + synced cue."""
     style = edit_plan.get("style") or "CLEAN_DISCOVERY"
-    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style, "motion-text")
+    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style, "motion-text-v73")
 
     if style == "CALM_LEARNING":
-        opening_motion = "rise"
-        keyword_motion = "rise"
+        opening_motion = "cinematic_rise"
+        keyword_motion = "soft_reveal"
         opening_sfx = "none"
         keyword_sfx = "none"
     elif style == "COUNT_AND_PLAY":
-        opening_motion = "rise"
-        keyword_motion = "pop"
-        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" else "none"
-        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+        opening_motion = "title_wipe"
+        keyword_motion = "impact_pop"
+        opening_sfx = "motion_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "motion_hit" if edit_plan.get("show_keyword") else "none"
     elif style == "PLAYFUL_QUIZ":
-        opening_motion = "slide_left" if h % 2 == 0 else "slide_right"
-        keyword_motion = "pop"
-        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" else "none"
-        keyword_sfx = "soft_pop" if edit_plan.get("show_keyword") else "none"
+        opening_motion = "title_slide_left" if h % 2 == 0 else "title_slide_right"
+        keyword_motion = "impact_pop"
+        opening_sfx = "motion_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "motion_hit" if edit_plan.get("show_keyword") else "none"
     elif style == "STORY_MODE":
-        opening_motion = "rise" if h % 2 == 0 else "slide_left"
-        keyword_motion = "rise"
+        opening_motion = "cinematic_rise"
+        keyword_motion = "soft_reveal"
         opening_sfx = "none"
         keyword_sfx = "none"
-    else:  # CLEAN_DISCOVERY
-        opening_motion = "rise" if h % 3 else "slide_right"
-        keyword_motion = "rise" if h % 2 else "pop"
-        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" and h % 3 == 0 else "none"
-        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+    else:
+        opening_motion = "title_wipe" if h % 2 else "title_slide_right"
+        keyword_motion = "impact_pop" if h % 3 else "soft_reveal"
+        opening_sfx = "motion_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "motion_hit" if edit_plan.get("show_keyword") and keyword_motion == "impact_pop" else (
+            "soft_ding" if edit_plan.get("show_keyword") else "none"
+        )
 
-    # Hard cap: at most two tiny cues, and never invent a cue for hidden text.
     if edit_plan.get("opening") == "none":
         opening_sfx = "none"
     if not edit_plan.get("show_keyword"):
@@ -503,6 +536,8 @@ def build_motion_typography_plan(payload, edit_plan):
         "keyword_sfx": keyword_sfx,
         "motion_duration": TEXT_MOTION_DURATION,
         "bounce_duration": TEXT_BOUNCE_DURATION,
+        "panel_duration": TEXT_PANEL_DURATION,
+        "accent_duration": TEXT_ACCENT_DURATION,
     }
 
 
@@ -1126,71 +1161,93 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         opening_text = texts["topic"]
     elif edit_plan["opening"] == "category":
         opening_text = texts["category"]
+
+    # MOTION GRAPHICS TITLE CARD: the plate, accent and text animate as one designed unit.
     if opening_text:
         st, en = timing["opening_start"], timing["opening_end"]
-        box_w = min(730, max(330, 28 * len(opening_text) + 90))
-        base_box_x = int((OUTPUT_W - box_w) / 2)
-        motion = motion_plan.get("opening_motion", "rise")
-        if motion == "slide_left":
-            box_x_expr = motion_slide_x(str(base_box_x), st, offset=-72)
-            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=-72)
-            box_y_expr = str(SAFE_TOP + 72)
-            text_y_expr = str(SAFE_TOP + 91)
-        elif motion == "slide_right":
-            box_x_expr = motion_slide_x(str(base_box_x), st, offset=72)
-            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=72)
-            box_y_expr = str(SAFE_TOP + 72)
-            text_y_expr = str(SAFE_TOP + 91)
+        box_w = min(760, max(340, 28 * len(opening_text) + 104))
+        box_h = 82
+        center_x = OUTPUT_W / 2
+        base_y = SAFE_TOP + 72
+        motion = motion_plan.get("opening_motion", "title_wipe")
+        panel_w = motion_panel_width(box_w, st, TEXT_PANEL_DURATION, 0.66)
+        panel_x = motion_panel_x(center_x, box_w, st, TEXT_PANEL_DURATION, 0.66)
+        accent_w = f"({box_w}*{motion_ease_out(st+0.03, TEXT_ACCENT_DURATION)})"
+        accent_x = f"({center_x}-({accent_w})/2)"
+
+        text_x = "(w-text_w)/2"
+        text_y = str(base_y + 21)
+        if motion == "title_slide_left":
+            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=-96, dur=0.30)
+        elif motion == "title_slide_right":
+            text_x = motion_slide_x("(w-text_w)/2", st + 0.04, offset=96, dur=0.30)
         else:
-            box_x_expr = str(base_box_x)
-            text_x_expr = "(w-text_w)/2"
-            box_y_expr = motion_rise_y(SAFE_TOP + 72, st, pixels=10)
-            text_y_expr = motion_rise_y(SAFE_TOP + 91, st, pixels=10)
+            text_y = motion_rise_y(base_y + 21, st + 0.04, pixels=18, dur=0.30)
+
+        # soft shadow plate grows from the center
         step(
-            f"drawbox=x='{box_x_expr}':y='{box_y_expr}':w={box_w}:h=76:"
-            f"color={theme['box']}@0.48:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
+            f"color=black@0.34:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+        )
+        # colored accent wipe gives the title a real motion-graphics entrance
+        step(
+            f"drawbox=x='{accent_x}':y={base_y+box_h-6}:w='{accent_w}':h=6:"
+            f"color={theme['accent']}@0.94:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+        )
+        # one short glow flash behind the title, then completely static
+        step(
+            f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white@0.10:fontsize=40:"
+            f"borderw=7:bordercolor={theme['accent']}@0.55:x='{text_x}':y='{text_y}':"
+            f"alpha='{entrance_only_alpha(st+0.03,0.30,0.60)}'"
         )
         step(
-            f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=38:"
-            f"shadowx=1:shadowy=1:shadowcolor=black@0.34:x='{text_x_expr}':"
-            f"y='{text_y_expr}':alpha='{fade_alpha(st,en)}'"
+            f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=40:"
+            f"shadowx=2:shadowy=2:shadowcolor=black@0.38:x='{text_x}':y='{text_y}':"
+            f"alpha='{fade_alpha(st,en,0.14)}'"
         )
 
+    # IMPACT KEYWORD: center-expanding plate + flash outline + underline sweep + one overshoot.
     if edit_plan["show_keyword"] and texts["keyword"]:
         st, en = timing["keyword_start"], timing["keyword_end"]
         kw = texts["keyword"]
-        box_w = min(610, max(250, 34 * len(kw) + 90))
-        base_box_x = int((OUTPUT_W - box_w) / 2)
-        y = SAFE_TOP + 190
-        motion = motion_plan.get("keyword_motion", "pop")
-        if motion == "slide_left":
-            box_x_expr = motion_slide_x(str(base_box_x), st, offset=-58)
-            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=-58)
-            box_y_expr = str(y)
-            text_y_expr = str(y + 20)
-        elif motion == "slide_right":
-            box_x_expr = motion_slide_x(str(base_box_x), st, offset=58)
-            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=58)
-            box_y_expr = str(y)
-            text_y_expr = str(y + 20)
-        elif motion == "rise":
-            box_x_expr = str(base_box_x)
-            text_x_expr = "(w-text_w)/2"
-            box_y_expr = motion_rise_y(y, st, pixels=12)
-            text_y_expr = motion_rise_y(y + 20, st, pixels=12)
-        else:  # restrained one-shot pop
-            box_x_expr = str(base_box_x)
-            text_x_expr = "(w-text_w)/2"
-            box_y_expr = motion_pop_y(y, st, amp=10)
-            text_y_expr = motion_pop_y(y + 20, st, amp=13)
+        box_w = min(650, max(270, 34 * len(kw) + 108))
+        box_h = 96
+        center_x = OUTPUT_W / 2
+        base_y = SAFE_TOP + 190
+        motion = motion_plan.get("keyword_motion", "impact_pop")
+        panel_w = motion_panel_width(box_w, st, TEXT_PANEL_DURATION, 0.58 if motion == "impact_pop" else 0.76)
+        panel_x = motion_panel_x(center_x, box_w, st, TEXT_PANEL_DURATION, 0.58 if motion == "impact_pop" else 0.76)
+        underline_w = f"({box_w-34}*{motion_ease_out(st+0.05, TEXT_ACCENT_DURATION)})"
+        underline_x = f"({center_x}-({underline_w})/2)"
+
+        if motion == "impact_pop":
+            text_y = motion_pop_y(base_y + 23, st + 0.02, amp=18, dur=TEXT_BOUNCE_DURATION)
+        else:
+            text_y = motion_rise_y(base_y + 23, st + 0.02, pixels=14, dur=0.30)
+
         step(
-            f"drawbox=x='{box_x_expr}':y='{box_y_expr}':w={box_w}:h=88:"
-            f"color={theme['accent']}@0.78:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
+            f"color={theme['accent']}@0.86:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+        )
+        # outline flash makes the reveal feel like a designed impact, not a plain subtitle
+        step(
+            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
+            f"color=white@0.72:t=3:enable='between(t,{st:.3f},{min(en,st+0.30):.3f})'"
         )
         step(
-            f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=46:"
-            f"shadowx=1:shadowy=1:shadowcolor=white@0.18:x='{text_x_expr}':"
-            f"y='{text_y_expr}':alpha='{fade_alpha(st,en)}'"
+            f"drawbox=x='{underline_x}':y={base_y+box_h+7}:w='{underline_w}':h=5:"
+            f"color=white@0.72:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
+        )
+        # brief halo behind the word during impact only
+        step(
+            f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=white@0.08:fontsize=49:"
+            f"borderw=8:bordercolor=white@0.48:x=(w-text_w)/2:y='{text_y}':"
+            f"alpha='{entrance_only_alpha(st,0.32,0.58)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=49:"
+            f"shadowx=1:shadowy=2:shadowcolor=white@0.20:x=(w-text_w)/2:y='{text_y}':"
+            f"alpha='{fade_alpha(st,en,0.12)}'"
         )
 
     if edit_plan["use_progress"]:
@@ -1233,16 +1290,41 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
             return
         delay = int(max(0.0, when) * 1000)
         label = f"{prefix}sfx"
-        if kind == "soft_whoosh":
-            # A tiny filtered air movement that follows the slide/rise entrance.
+
+        if kind in {"soft_whoosh", "motion_whoosh"}:
+            # Purposeful title entrance: filtered air sweep with a soft tonal tail.
+            nlab = f"{prefix}noise"
+            tlab = f"{prefix}tone"
             parts.append(
-                "anoisesrc=color=white:sample_rate=48000:duration=0.15,"
-                "highpass=f=950,lowpass=f=4300,"
-                "afade=t=in:st=0:d=0.018,afade=t=out:st=0.075:d=0.07,"
-                f"volume={min(TEXT_SFX_MAX_GAIN,0.0038):.4f},adelay={delay}|{delay}[{label}];"
+                "anoisesrc=color=white:sample_rate=48000:duration=0.19,"
+                "highpass=f=700,lowpass=f=3900,"
+                "afade=t=in:st=0:d=0.015,afade=t=out:st=0.085:d=0.095,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0046):.4f},adelay={delay}|{delay}[{nlab}];"
             )
+            parts.append(
+                "sine=frequency=720:sample_rate=48000:duration=0.11,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.045:d=0.060,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0024):.4f},adelay={delay+55}|{delay+55}[{tlab}];"
+            )
+            parts.append(f"[{nlab}][{tlab}]amix=inputs=2:normalize=0:duration=longest[{label}];")
+
+        elif kind == "motion_hit":
+            # Reveal impact: rounded low pop + tiny high reward tone, not an arcade jingle.
+            plab = f"{prefix}pop"
+            dlab = f"{prefix}ding"
+            parts.append(
+                "sine=frequency=430:sample_rate=48000:duration=0.10,"
+                "afade=t=in:st=0:d=0.006,afade=t=out:st=0.035:d=0.060,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0052):.4f},adelay={delay}|{delay}[{plab}];"
+            )
+            parts.append(
+                "sine=frequency=1180:sample_rate=48000:duration=0.13,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.050:d=0.075,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0036):.4f},adelay={delay+42}|{delay+42}[{dlab}];"
+            )
+            parts.append(f"[{plab}][{dlab}]amix=inputs=2:normalize=0:duration=longest[{label}];")
+
         elif kind == "soft_pop":
-            # Short rounded pop: one low-mid tone, no arcade-style chirp.
             parts.append(
                 "sine=frequency=540:sample_rate=48000:duration=0.085,"
                 "afade=t=in:st=0:d=0.008,afade=t=out:st=0.035:d=0.045,"
