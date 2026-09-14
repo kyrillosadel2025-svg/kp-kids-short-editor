@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.3: Intelligent Edit + Motion Graphics Text + Contextual Graphics + Intro + Closure
-# V7.3 motion-graphics typography pass:
+# KP Kids Short Editor V7.4: Intelligent Edit + Clean Motion Text + Contextual Graphics + Intro + Closure
+# V7.4 motion-graphics typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
@@ -15,7 +15,7 @@
 # - synchronizes tiny generated SFX with text entrances and ducks them under dialogue.
 # - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
 # - adds one contextual motion-graphic cue at most, selected from lesson/category metadata.
-# - motion graphics explain/direct/reward only: focus brackets, direction arrow, shape badge, color sweep, or scan line.
+# - contextual scene overlays removed: motion design is now limited to typography only.
 # - avoids decorative particle fields, confetti, random squares, and persistent HUD clutter.
 
 import argparse
@@ -45,7 +45,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.3 Intelligent Edit + Motion Graphics Text + Contextual Motion Graphics"
+EDITOR_VERSION = "V7.4 Intelligent Edit + Clean Motion Text + Contextual Motion Graphics"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -445,50 +445,19 @@ def shape_symbol_from_payload(payload):
 
 def build_motion_graphics_plan(payload, edit_plan, theme):
     """
-    Choose at most one contextual motion graphic.  The cue must teach, direct
-    attention, or reinforce a reveal; it must never exist merely to decorate.
+    Contextual scene overlays are intentionally disabled.
+
+    Earlier builds drew scan lines, brackets, arrows, badges and color sweeps
+    over the generated scene. Without object tracking these cues could land in
+    visually wrong places and made the edit feel synthetic. V7.4 keeps motion
+    design on the typography itself only.
     """
-    category = str(payload.get("category") or "").lower()
-    lesson_key = str(payload.get("lesson_key") or "").lower()
-    fmt = str(payload.get("episode_format") or "").lower()
-    lead = str(payload.get("lead_character") or "").lower()
-    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
-    h = stable_hash_int(payload.get("short_id"), lesson_key, category, fmt, "motion-graphics")
-
-    # Calm/social lessons are intentionally visually quiet most of the time.
-    if style == "CALM_LEARNING" and h % 4 != 0:
-        return {"type":"none", "sfx":"none", "reason":"calm_learning_breathing_room"}
-
-    mg_type = "none"
-    reason = "no_contextual_need"
-
-    if category == "shapes" and shape_symbol_from_payload(payload):
-        mg_type, reason = "shape_badge", "reinforce_shape_identity"
-    elif category == "colors":
-        mg_type, reason = "color_sweep", "reinforce_color_reveal"
-    elif category == "directions":
-        mg_type, reason = "direction_arrow", "direct_spatial_attention"
-    elif category in {"sorting", "patterns"}:
-        mg_type, reason = "scan_line", "support_search_or_pattern_scan"
-    elif "scan" in fmt or lead == "bibo":
-        mg_type, reason = "scan_line", "match_bibo_scan_behavior"
-    elif category in {"science", "space", "positions", "numbers", "counting", "math"}:
-        mg_type, reason = "focus_brackets", "focus_teaching_target_at_reveal"
-    elif category in {"animals", "nature", "weather", "world", "transport", "community", "food", "safety", "seasons"}:
-        # Only some episodes need a graphical cue; preserve natural footage in the rest.
-        if h % 3 != 0:
-            mg_type, reason = "focus_brackets", "brief_reveal_focus"
-
-    # No third sound if typography already has a reveal cue; build_audio_filter enforces this too.
-    sfx = "tiny_whoosh" if mg_type in {"direction_arrow", "scan_line", "color_sweep"} else "none"
     return {
-        "type": mg_type,
-        "reason": reason,
-        "accent": lesson_accent_color(payload, theme.get("accent", "0xFFD54A")),
-        "shape_symbol": shape_symbol_from_payload(payload),
-        "sfx": sfx,
-        "duration": MOTION_GRAPHICS_DURATION,
-        "entrance": MOTION_GRAPHICS_ENTRANCE,
+        "type": "none",
+        "sfx": "none",
+        "reason": "disabled_scene_overlays_keep_motion_on_text_only",
+        "duration": 0.0,
+        "entrance": 0.0,
     }
 
 def build_motion_typography_plan(payload, edit_plan):
@@ -1162,7 +1131,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
     elif edit_plan["opening"] == "category":
         opening_text = texts["category"]
 
-    # MOTION GRAPHICS TITLE CARD: the plate, accent and text animate as one designed unit.
+    # CLEAN MOTION TITLE: panel + text movement only; no decorative lines or outlines.
     if opening_text:
         st, en = timing["opening_start"], timing["opening_end"]
         box_w = min(760, max(340, 28 * len(opening_text) + 104))
@@ -1172,9 +1141,6 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         motion = motion_plan.get("opening_motion", "title_wipe")
         panel_w = motion_panel_width(box_w, st, TEXT_PANEL_DURATION, 0.66)
         panel_x = motion_panel_x(center_x, box_w, st, TEXT_PANEL_DURATION, 0.66)
-        accent_w = f"({box_w}*{motion_ease_out(st+0.03, TEXT_ACCENT_DURATION)})"
-        accent_x = f"({center_x}-({accent_w})/2)"
-
         text_x = "(w-text_w)/2"
         text_y = str(base_y + 21)
         if motion == "title_slide_left":
@@ -1189,24 +1155,13 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
             f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
             f"color=black@0.34:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
         )
-        # colored accent wipe gives the title a real motion-graphics entrance
-        step(
-            f"drawbox=x='{accent_x}':y={base_y+box_h-6}:w='{accent_w}':h=6:"
-            f"color={theme['accent']}@0.94:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-        # one short glow flash behind the title, then completely static
-        step(
-            f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white@0.10:fontsize=40:"
-            f"borderw=7:bordercolor={theme['accent']}@0.55:x='{text_x}':y='{text_y}':"
-            f"alpha='{entrance_only_alpha(st+0.03,0.30,0.60)}'"
-        )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=40:"
             f"shadowx=2:shadowy=2:shadowcolor=black@0.38:x='{text_x}':y='{text_y}':"
             f"alpha='{fade_alpha(st,en,0.14)}'"
         )
 
-    # IMPACT KEYWORD: center-expanding plate + flash outline + underline sweep + one overshoot.
+    # IMPACT KEYWORD: center-expanding panel + one text overshoot; no decorative lines.
     if edit_plan["show_keyword"] and texts["keyword"]:
         st, en = timing["keyword_start"], timing["keyword_end"]
         kw = texts["keyword"]
@@ -1217,9 +1172,6 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         motion = motion_plan.get("keyword_motion", "impact_pop")
         panel_w = motion_panel_width(box_w, st, TEXT_PANEL_DURATION, 0.58 if motion == "impact_pop" else 0.76)
         panel_x = motion_panel_x(center_x, box_w, st, TEXT_PANEL_DURATION, 0.58 if motion == "impact_pop" else 0.76)
-        underline_w = f"({box_w-34}*{motion_ease_out(st+0.05, TEXT_ACCENT_DURATION)})"
-        underline_x = f"({center_x}-({underline_w})/2)"
-
         if motion == "impact_pop":
             text_y = motion_pop_y(base_y + 23, st + 0.02, amp=18, dur=TEXT_BOUNCE_DURATION)
         else:
@@ -1228,21 +1180,6 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         step(
             f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
             f"color={theme['accent']}@0.86:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-        # outline flash makes the reveal feel like a designed impact, not a plain subtitle
-        step(
-            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
-            f"color=white@0.72:t=3:enable='between(t,{st:.3f},{min(en,st+0.30):.3f})'"
-        )
-        step(
-            f"drawbox=x='{underline_x}':y={base_y+box_h+7}:w='{underline_w}':h=5:"
-            f"color=white@0.72:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-        # brief halo behind the word during impact only
-        step(
-            f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=white@0.08:fontsize=49:"
-            f"borderw=8:bordercolor=white@0.48:x=(w-text_w)/2:y='{text_y}':"
-            f"alpha='{entrance_only_alpha(st,0.32,0.58)}'"
         )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=49:"
@@ -1505,7 +1442,7 @@ def edit_video(src, out, payload):
             "dialogue_focus": bool(speech_windows and info["has_audio"]),
             "sfx_ducking": bool(motion_plan.get("opening_sfx") != "none" or motion_plan.get("keyword_sfx") != "none"),
             "text_sfx": {"opening": motion_plan.get("opening_sfx"), "keyword": motion_plan.get("keyword_sfx")},
-            "motion_graphics_sfx": motion_graphics_plan.get("sfx", "none"),
+            "motion_graphics_sfx": "none",
         },
     }
 
