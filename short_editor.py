@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.5: Intelligent Edit + Long-Hold Motion Text + Audible SFX + Intro + Closure
+# KP Kids Short Editor V7.6: Retention Polish + Long-Hold Motion Text + 3s+ Brand Clips
 # V7.5 long-hold motion typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -44,7 +44,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.5 Intelligent Edit + Long-Hold Motion Text + Audible SFX"
+EDITOR_VERSION = "V7.6 Retention Polish + Long-Hold Motion Text + 3s+ Brand Clips"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -56,6 +56,9 @@ SAFE_RIGHT = 170
 OUTPUT_W = 1080
 OUTPUT_H = 1920
 OUTPUT_FPS = 24
+INTRO_TARGET_SECONDS = 3.25
+CLOSURE_TARGET_SECONDS = 3.40
+MIN_BRAND_CLIP_SECONDS = 3.00
 
 TEXT_MOTION_DURATION = 0.46
 TEXT_BOUNCE_DURATION = 0.48
@@ -867,14 +870,23 @@ def build_edit_plan(payload, duration):
     style = choose_editorial_style(payload)
     h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style)
 
-    # Branding is intentionally quiet and not treated as a primary overlay.
-    show_brand = True
+    # Intro + closure already carry the brand. Keep the lesson body visually clean.
+    show_brand = False
 
-    # One opening idea only: either topic OR category, never both.
-    if style == "STORY_MODE":
-        opening = "none" if h % 2 == 0 else ("topic" if topic else "none")
+    # One opening idea only, and only when it adds information. Mystery/guess/find/reveal
+    # formats often already communicate the hook visually, so avoid duplicating it with text.
+    fmt = str(payload.get("episode_format") or "").lower()
+    visual_hook_format = any(k in fmt for k in (
+        "mystery", "guess", "reveal", "find", "choose", "what-happens",
+        "mistake", "odd", "scan", "before-after"
+    ))
+    if visual_hook_format:
+        opening = "none"
+    elif style == "STORY_MODE":
+        opening = "none" if h % 3 != 0 else ("topic" if topic else "none")
     elif style == "PLAYFUL_QUIZ":
-        opening = "topic" if topic and len(topic) <= 30 else "category"
+        # Keep some quiz episodes completely clean so the generated visual hook can lead.
+        opening = "none" if h % 3 == 0 else ("topic" if topic and len(topic) <= 30 else "category")
     elif style == "COUNT_AND_PLAY":
         opening = "category"
     elif style == "CALM_LEARNING":
@@ -892,7 +904,7 @@ def build_edit_plan(payload, duration):
         "PLAYFUL_QUIZ": "REVEAL_PUSH",
         "CALM_LEARNING": "STATIC",
         "COUNT_AND_PLAY": "GENTLE_PUSH",
-        "STORY_MODE": "STATIC" if h % 2 == 0 else "GENTLE_PUSH",
+        "STORY_MODE": "REVEAL_PUSH",
     }[style]
 
     # Closure already performs the real ending, so the body avoids a second end card.
@@ -1324,32 +1336,63 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
         parts.append("[amain]anull[aout]")
     return "".join(parts)
 
-def normalize_intro(src, dest):
-    """Normalize intro/closure to exact output format; speed is NOT changed."""
+def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP_SECONDS):
+    """Normalize intro/closure to output format and retime to a concise 3s+ branding clip.
+
+    Existing clips longer than target are trimmed cleanly. Clips shorter than the minimum
+    are padded by holding the final frame and padding audio, so branding never drops
+    below the requested minimum duration. Intro/closure speed itself is never changed.
+    """
     info = ffprobe_video_info(src)
+    src_dur = max(float(info.get("duration") or 0.0), 0.01)
+    if target_duration is None:
+        target_duration = src_dur
+    target_duration = max(float(target_duration), float(min_duration))
+    effective_duration = target_duration
+
+    # Always allow a final-frame hold, then trim to the exact target. This makes
+    # both long and unexpectedly short brand clips robust without changing speed.
+    vf = (
+        f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+        f"crop={OUTPUT_W}:{OUTPUT_H},fps={OUTPUT_FPS},setsar=1,format=yuv420p,"
+        f"tpad=stop_mode=clone:stop_duration={effective_duration:.3f},"
+        f"trim=duration={effective_duration:.3f},setpts=PTS-STARTPTS"
+    )
+
     cmd = ["ffmpeg", "-y", "-i", str(src)]
     if not info["has_audio"]:
         cmd += [
             "-f", "lavfi", "-i",
-            f"anullsrc=r=48000:cl=stereo:d={max(info['duration'],0.1):.3f}"
+            f"anullsrc=r=48000:cl=stereo:d={effective_duration:.3f}"
         ]
+
+    if info["has_audio"]:
+        af = (
+            f"aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"apad=pad_dur={effective_duration:.3f},atrim=duration={effective_duration:.3f},"
+            f"asetpts=PTS-STARTPTS,"
+            f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},alimiter=limit=0.94"
+        )
+    else:
+        af = (
+            f"aformat=sample_rates=48000:channel_layouts=stereo,atrim=duration={effective_duration:.3f},"
+            f"asetpts=PTS-STARTPTS,loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},"
+            f"alimiter=limit=0.94"
+        )
 
     cmd += [
         "-map", "0:v:0",
         "-map", "0:a:0" if info["has_audio"] else "1:a:0",
-        "-vf",
-        f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-        f"crop={OUTPUT_W}:{OUTPUT_H},fps={OUTPUT_FPS},setsar=1,format=yuv420p",
-        "-af",
-        f"aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1:first_pts=0,"
-        f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},alimiter=limit=0.94",
-        "-shortest",
+        "-vf", vf,
+        "-af", af,
+        "-t", f"{effective_duration:.3f}",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(dest),
     ]
     run(cmd)
+
 
 def prepend_intro(intro, body, output, xfade_dur=0.28):
     """Subtle intro-to-story dissolve; kept short so the generated hook stays energetic."""
@@ -1491,11 +1534,11 @@ def main():
         result = edit_video(src, edited_body, payload)
 
         download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
-        normalize_intro(intro_raw, intro_norm)
+        normalize_intro(intro_raw, intro_norm, target_duration=INTRO_TARGET_SECONDS)
         prepend_intro(intro_norm, edited_body, body_with_intro, xfade_dur=result["transition_plan"]["intro_xfade"])
 
         download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
-        normalize_intro(closure_raw, closure_norm)
+        normalize_intro(closure_raw, closure_norm, target_duration=CLOSURE_TARGET_SECONDS)
         append_closure(body_with_intro, closure_norm, Path(args.output), xfade_dur=result["transition_plan"]["closure_xfade"])
 
     meta = dict(payload)
@@ -1517,6 +1560,9 @@ def main():
     meta["edit_theme"] = result["theme"]
     meta["source_video_info"] = result["source_info"]
     meta["body_duration_after_speed"] = result["body_duration"]
+    meta["intro_target_seconds"] = INTRO_TARGET_SECONDS
+    meta["closure_target_seconds"] = CLOSURE_TARGET_SECONDS
+    meta["minimum_brand_clip_seconds"] = MIN_BRAND_CLIP_SECONDS
     meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
     meta["intro_prepend_enabled"] = True
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
