@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.0: Intelligent Human-Like Edit + Intro + Closure
-# V7.0 intelligent edit pass:
+# KP Kids Short Editor V7.1: Intelligent Human-Like Edit + Motion Typography + Intro + Closure
+# V7.1 motion typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
@@ -11,6 +11,9 @@
 # - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
 # - logs detailed pacing/audio/color/timing telemetry for future retention analysis.
 # - preserves robust Drive retry, intro/closure crossfades, payload and result metadata.
+# - adds restrained motion typography: short purposeful entrances, then stable readable text.
+# - synchronizes tiny generated SFX with text entrances and ducks them under dialogue.
+# - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
 
 import argparse
 import base64
@@ -39,7 +42,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.0 Intelligent Human-Like Edit"
+EDITOR_VERSION = "V7.1 Intelligent Human-Like Edit + Motion Typography"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -51,6 +54,11 @@ SAFE_RIGHT = 170
 OUTPUT_W = 1080
 OUTPUT_H = 1920
 OUTPUT_FPS = 24
+
+TEXT_MOTION_DURATION = 0.26
+TEXT_BOUNCE_DURATION = 0.34
+TEXT_SFX_MAX_GAIN = 0.0055
+
 
 
 def run(cmd):
@@ -326,6 +334,81 @@ def soft_rise_y(base_y, start, pixels=8.0, settle=0.28):
         f"if(lt(t,{start+settle:.3f}),"
         f"{pixels:.1f}*(1-(t-{start:.3f})/{settle:.3f}),0))"
     )
+
+
+def motion_slide_x(base_expr, start, offset=80.0, dur=TEXT_MOTION_DURATION):
+    """Short decelerating horizontal entrance, then perfectly still for readability."""
+    return (
+        f"({base_expr})+if(lt(t,{start:.3f}),{offset:.1f},"
+        f"if(lt(t,{start+dur:.3f}),{offset:.1f}*"
+        f"(1-(t-{start:.3f})/{dur:.3f})*(1-(t-{start:.3f})/{dur:.3f}),0))"
+    )
+
+
+def motion_rise_y(base_y, start, pixels=14.0, dur=TEXT_MOTION_DURATION):
+    """Premium short upward settle; motion stops after ~250 ms."""
+    return (
+        f"{base_y}+if(lt(t,{start:.3f}),{pixels:.1f},"
+        f"if(lt(t,{start+dur:.3f}),{pixels:.1f}*"
+        f"(1-(t-{start:.3f})/{dur:.3f})*(1-(t-{start:.3f})/{dur:.3f}),0))"
+    )
+
+
+def motion_pop_y(base_y, start, amp=15.0, dur=TEXT_BOUNCE_DURATION):
+    """One restrained spring-in used only for playful reveal words."""
+    # Decaying oscillation is limited to the entrance window; after that text is static.
+    return (
+        f"{base_y}+if(lt(t,{start:.3f}),{amp:.1f},"
+        f"if(lt(t,{start+dur:.3f}),"
+        f"{amp:.1f}*exp(-10*(t-{start:.3f}))*cos(19*(t-{start:.3f})),0))"
+    )
+
+
+def build_motion_typography_plan(payload, edit_plan):
+    """Deterministic text motion/SFX choices that stay subtle and episode-aware."""
+    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
+    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style, "motion-text")
+
+    if style == "CALM_LEARNING":
+        opening_motion = "rise"
+        keyword_motion = "rise"
+        opening_sfx = "none"
+        keyword_sfx = "none"
+    elif style == "COUNT_AND_PLAY":
+        opening_motion = "rise"
+        keyword_motion = "pop"
+        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+    elif style == "PLAYFUL_QUIZ":
+        opening_motion = "slide_left" if h % 2 == 0 else "slide_right"
+        keyword_motion = "pop"
+        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "soft_pop" if edit_plan.get("show_keyword") else "none"
+    elif style == "STORY_MODE":
+        opening_motion = "rise" if h % 2 == 0 else "slide_left"
+        keyword_motion = "rise"
+        opening_sfx = "none"
+        keyword_sfx = "none"
+    else:  # CLEAN_DISCOVERY
+        opening_motion = "rise" if h % 3 else "slide_right"
+        keyword_motion = "rise" if h % 2 else "pop"
+        opening_sfx = "soft_whoosh" if edit_plan.get("opening") != "none" and h % 3 == 0 else "none"
+        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+
+    # Hard cap: at most two tiny cues, and never invent a cue for hidden text.
+    if edit_plan.get("opening") == "none":
+        opening_sfx = "none"
+    if not edit_plan.get("show_keyword"):
+        keyword_sfx = "none"
+
+    return {
+        "opening_motion": opening_motion,
+        "keyword_motion": keyword_motion,
+        "opening_sfx": opening_sfx,
+        "keyword_sfx": keyword_sfx,
+        "motion_duration": TEXT_MOTION_DURATION,
+        "bounce_duration": TEXT_BOUNCE_DURATION,
+    }
 
 
 def stable_hash_int(*parts):
@@ -824,7 +907,7 @@ def build_camera_filter(chain_in, chain_out, mode, timing):
     )
 
 
-def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan):
+def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan):
     parts = [build_paced_video_prefix(pacing_plan)]
 
     eq_base = (
@@ -892,31 +975,68 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
     if opening_text:
         st, en = timing["opening_start"], timing["opening_end"]
         box_w = min(730, max(330, 28 * len(opening_text) + 90))
-        box_x = int((OUTPUT_W - box_w) / 2)
+        base_box_x = int((OUTPUT_W - box_w) / 2)
+        motion = motion_plan.get("opening_motion", "rise")
+        if motion == "slide_left":
+            box_x_expr = motion_slide_x(str(base_box_x), st, offset=-72)
+            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=-72)
+            box_y_expr = str(SAFE_TOP + 72)
+            text_y_expr = str(SAFE_TOP + 91)
+        elif motion == "slide_right":
+            box_x_expr = motion_slide_x(str(base_box_x), st, offset=72)
+            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=72)
+            box_y_expr = str(SAFE_TOP + 72)
+            text_y_expr = str(SAFE_TOP + 91)
+        else:
+            box_x_expr = str(base_box_x)
+            text_x_expr = "(w-text_w)/2"
+            box_y_expr = motion_rise_y(SAFE_TOP + 72, st, pixels=10)
+            text_y_expr = motion_rise_y(SAFE_TOP + 91, st, pixels=10)
         step(
-            f"drawbox=x={box_x}:y={SAFE_TOP+72}:w={box_w}:h=76:"
+            f"drawbox=x='{box_x_expr}':y='{box_y_expr}':w={box_w}:h=76:"
             f"color={theme['box']}@0.48:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
         )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(opening_text)}':fontcolor=white:fontsize=38:"
-            f"shadowx=1:shadowy=1:shadowcolor=black@0.34:x=(w-text_w)/2:"
-            f"y='{soft_rise_y(SAFE_TOP+91, st, pixels=6)}':alpha='{fade_alpha(st,en)}'"
+            f"shadowx=1:shadowy=1:shadowcolor=black@0.34:x='{text_x_expr}':"
+            f"y='{text_y_expr}':alpha='{fade_alpha(st,en)}'"
         )
 
     if edit_plan["show_keyword"] and texts["keyword"]:
         st, en = timing["keyword_start"], timing["keyword_end"]
         kw = texts["keyword"]
         box_w = min(610, max(250, 34 * len(kw) + 90))
-        box_x = int((OUTPUT_W - box_w) / 2)
+        base_box_x = int((OUTPUT_W - box_w) / 2)
         y = SAFE_TOP + 190
+        motion = motion_plan.get("keyword_motion", "pop")
+        if motion == "slide_left":
+            box_x_expr = motion_slide_x(str(base_box_x), st, offset=-58)
+            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=-58)
+            box_y_expr = str(y)
+            text_y_expr = str(y + 20)
+        elif motion == "slide_right":
+            box_x_expr = motion_slide_x(str(base_box_x), st, offset=58)
+            text_x_expr = motion_slide_x("(w-text_w)/2", st, offset=58)
+            box_y_expr = str(y)
+            text_y_expr = str(y + 20)
+        elif motion == "rise":
+            box_x_expr = str(base_box_x)
+            text_x_expr = "(w-text_w)/2"
+            box_y_expr = motion_rise_y(y, st, pixels=12)
+            text_y_expr = motion_rise_y(y + 20, st, pixels=12)
+        else:  # restrained one-shot pop
+            box_x_expr = str(base_box_x)
+            text_x_expr = "(w-text_w)/2"
+            box_y_expr = motion_pop_y(y, st, amp=10)
+            text_y_expr = motion_pop_y(y + 20, st, amp=13)
         step(
-            f"drawbox=x={box_x}:y={y}:w={box_w}:h=88:"
+            f"drawbox=x='{box_x_expr}':y='{box_y_expr}':w={box_w}:h=88:"
             f"color={theme['accent']}@0.78:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
         )
         step(
             f"drawtext=fontfile={FONT}:text='{esc(kw)}':fontcolor=black:fontsize=46:"
-            f"shadowx=1:shadowy=1:shadowcolor=white@0.18:x=(w-text_w)/2:"
-            f"y='{soft_rise_y(y+20, st, pixels=5)}':alpha='{fade_alpha(st,en)}'"
+            f"shadowx=1:shadowy=1:shadowcolor=white@0.18:x='{text_x_expr}':"
+            f"y='{text_y_expr}':alpha='{fade_alpha(st,en)}'"
         )
 
     if edit_plan["use_progress"]:
@@ -929,7 +1049,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
     return "".join(parts)
 
 
-def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows):
+def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan):
     parts = []
     if info["has_audio"]:
         parts.append(build_paced_audio_prefix(pacing_plan))
@@ -952,26 +1072,53 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
     else:
         parts.append(f"anullsrc=r=48000:cl=stereo:d={duration:.3f},asetpts=PTS-STARTPTS[amain];")
 
-    if edit_plan["use_reveal_sfx"]:
-        delay = int(max(0.0, timing["reveal"] - 0.03) * 1000)
-        delay2 = delay + 85
-        parts.append(
-            "sine=frequency=660:sample_rate=48000:duration=0.09,"
-            "afade=t=in:st=0:d=0.012,afade=t=out:st=0.045:d=0.04,"
-            f"volume=0.0062,adelay={delay}|{delay}[sfx1];"
-        )
-        parts.append(
-            "sine=frequency=880:sample_rate=48000:duration=0.10,"
-            "afade=t=in:st=0:d=0.012,afade=t=out:st=0.05:d=0.04,"
-            f"volume=0.0052,adelay={delay2}|{delay2}[sfx2];"
-        )
-        # Duck the tiny SFX under whatever is already happening in the main mix.
-        parts.append("[sfx1][sfx2]amix=inputs=2:normalize=0:duration=longest[sfxraw];")
+    cue_labels = []
+
+    def add_text_cue(kind, when, prefix):
+        if not kind or kind == "none":
+            return
+        delay = int(max(0.0, when) * 1000)
+        label = f"{prefix}sfx"
+        if kind == "soft_whoosh":
+            # A tiny filtered air movement that follows the slide/rise entrance.
+            parts.append(
+                "anoisesrc=color=white:sample_rate=48000:duration=0.15,"
+                "highpass=f=950,lowpass=f=4300,"
+                "afade=t=in:st=0:d=0.018,afade=t=out:st=0.075:d=0.07,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0038):.4f},adelay={delay}|{delay}[{label}];"
+            )
+        elif kind == "soft_pop":
+            # Short rounded pop: one low-mid tone, no arcade-style chirp.
+            parts.append(
+                "sine=frequency=540:sample_rate=48000:duration=0.085,"
+                "afade=t=in:st=0:d=0.008,afade=t=out:st=0.035:d=0.045,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0046):.4f},adelay={delay}|{delay}[{label}];"
+            )
+        else:  # soft_ding
+            parts.append(
+                "sine=frequency=1046:sample_rate=48000:duration=0.12,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.050:d=0.065,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0042):.4f},adelay={delay}|{delay}[{label}];"
+            )
+        cue_labels.append(f"[{label}]")
+
+    # The cue is synchronized to the first visible frame of the text motion.
+    if edit_plan.get("opening") != "none":
+        add_text_cue(motion_plan.get("opening_sfx"), timing["opening_start"], "open")
+    if edit_plan.get("show_keyword"):
+        add_text_cue(motion_plan.get("keyword_sfx"), timing["keyword_start"], "kw")
+
+    if cue_labels:
+        if len(cue_labels) == 1:
+            parts.append(f"{cue_labels[0]}anull[textsfx];")
+        else:
+            parts.append("".join(cue_labels) + f"amix=inputs={len(cue_labels)}:normalize=0:duration=longest[textsfx];")
+        # Duck typography cues under dialogue/main mix. This keeps words readable and speech dominant.
         parts.append("[amain]asplit=2[amainmix][side];")
         parts.append(
-            "[sfxraw][side]sidechaincompress=threshold=0.045:ratio=8:attack=4:release=100:mix=1[sfxduck];"
+            "[textsfx][side]sidechaincompress=threshold=0.040:ratio=10:attack=3:release=90:mix=1[textsfxduck];"
         )
-        parts.append("[amainmix][sfxduck]amix=inputs=2:normalize=0:duration=first[aout]")
+        parts.append("[amainmix][textsfxduck]amix=inputs=2:normalize=0:duration=first[aout]")
     else:
         parts.append("[amain]anull[aout]")
     return "".join(parts)
@@ -1067,6 +1214,7 @@ def edit_video(src, out, payload):
     edit_plan = build_edit_plan(payload, duration)
     timing = build_timing_plan(payload, source_duration, pacing_plan, silence_intervals)
     texts = build_text_plan(payload, edit_plan)
+    motion_plan = build_motion_typography_plan(payload, edit_plan)
     transition_plan = build_transition_plan(edit_plan)
 
     source_speech = complement_intervals(silence_intervals, source_duration)
@@ -1074,10 +1222,10 @@ def edit_video(src, out, payload):
     output_silences = map_intervals_to_output(silence_intervals, pacing_plan)
 
     vf = build_visual_filter(
-        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan
+        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan
     )
     af = build_audio_filter(
-        info, duration, edit_plan, timing, pacing_plan, speech_windows
+        info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan
     )
 
     cmd = [
@@ -1104,13 +1252,15 @@ def edit_video(src, out, payload):
         "body_duration": duration,
         "source_info": info,
         "texts": texts,
+        "motion_typography_plan": motion_plan,
         "audio_plan": {
             "target_lufs": TARGET_LUFS,
             "target_true_peak_db": TARGET_TRUE_PEAK_DB,
             "silence_threshold_db": SILENCE_DB,
             "silence_min_duration": SILENCE_MIN_DURATION,
             "dialogue_focus": bool(speech_windows and info["has_audio"]),
-            "sfx_ducking": bool(edit_plan["use_reveal_sfx"]),
+            "sfx_ducking": bool(motion_plan.get("opening_sfx") != "none" or motion_plan.get("keyword_sfx") != "none"),
+            "text_sfx": {"opening": motion_plan.get("opening_sfx"), "keyword": motion_plan.get("keyword_sfx")},
         },
     }
 
@@ -1158,6 +1308,7 @@ def main():
     meta["output_speech_intervals"] = result["output_speech_intervals"]
     meta["color_plan"] = result["color_plan"]
     meta["audio_plan"] = result["audio_plan"]
+    meta["motion_typography_plan"] = result["motion_typography_plan"]
     meta["edit_theme"] = result["theme"]
     meta["source_video_info"] = result["source_info"]
     meta["body_duration_after_speed"] = result["body_duration"]
