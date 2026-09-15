@@ -147,22 +147,69 @@ def _json_from_model_text(text):
 
 
 def _kie_chat_output_text(obj):
-    try:
-        content = obj["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"KIE response missing choices/message/content: {e}")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                if item.get("text"):
-                    parts.append(str(item["text"]))
-                elif item.get("content"):
-                    parts.append(str(item["content"]))
-        return "\\n".join(parts).strip()
-    return str(content or "").strip()
+    """Extract assistant text from KIE chat responses. KIE documents the OpenAI-compatible success shape with choices at the root, but some gateway/provider responses can arrive wrapped under data. Accept both, and surface KIE's own code/msg/error instead of hiding it behind a KeyError so Telegram shows the real cause. """
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"KIE returned non-object JSON: {type(obj).__name__}")
+
+    candidates = [obj]
+    data = obj.get("data")
+    if isinstance(data, dict):
+        candidates.append(data)
+
+    for root in candidates:
+        choices = root.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            message = first.get("message") if isinstance(first, dict) else None
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content.strip()
+                if isinstance(content, list):
+                    parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get("text") is not None:
+                                parts.append(str(item.get("text")))
+                            elif item.get("content") is not None:
+                                parts.append(str(item.get("content")))
+                    text = "\n".join(x for x in parts if x).strip()
+                    if text:
+                        return text
+
+            # Some compatible gateways expose text directly on the choice.
+            if isinstance(first, dict) and first.get("text") is not None:
+                return str(first.get("text")).strip()
+
+    # Accept a few wrapper/result shapes if KIE changes its gateway envelope.
+    for root in candidates:
+        for key in ("content", "response", "result", "output", "text"):
+            value = root.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                for subkey in ("content", "text", "response"):
+                    sv = value.get(subkey)
+                    if isinstance(sv, str) and sv.strip():
+                        return sv.strip()
+
+    # If this is an API/provider error wrapped in HTTP 200, expose it verbatim.
+    code = obj.get("code")
+    msg = obj.get("msg") or obj.get("message")
+    err = obj.get("error")
+    if isinstance(err, dict):
+        err = err.get("message") or err.get("msg") or json.dumps(err, ensure_ascii=False)
+    detail = {
+        "code": code,
+        "msg": msg,
+        "error": err,
+        "keys": sorted(obj.keys()),
+    }
+    if isinstance(data, dict):
+        detail["data_keys"] = sorted(data.keys())
+        if not msg:
+            detail["data_msg"] = data.get("msg") or data.get("message") or data.get("error")
+    raise RuntimeError("KIE non-chat response: " + json.dumps(detail, ensure_ascii=False)[:900])
 
 
 def semantic_story_qa(path, payload, duration):
@@ -268,6 +315,10 @@ def semantic_story_qa(path, payload, duration):
         },
     }
 
+    # Deliberately do not send response_format here. KIE documents it, but the
+    # video+structured-output combination has returned non-standard gateway
+    # envelopes in production. The prompt already requires JSON-only output,
+    # and _json_from_model_text validates it locally.
     body = {
         "messages": [
             {
@@ -279,7 +330,7 @@ def semantic_story_qa(path, payload, duration):
             }
         ],
         "stream": False,
-        "response_format": schema,
+        "include_thoughts": False,
     }
 
     req = urllib.request.Request(
@@ -289,13 +340,14 @@ def semantic_story_qa(path, payload, duration):
         headers={
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
-            "User-Agent": "KP-Kids-RAW-QA/3.0",
+            "User-Agent": "KP-Kids-RAW-QA/4.0",
         },
     )
 
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
-            obj = json.loads(resp.read().decode("utf-8"))
+            raw_text = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(raw_text)
         verdict = _json_from_model_text(_kie_chat_output_text(obj))
     except urllib.error.HTTPError as e:
         try:
@@ -312,10 +364,18 @@ def semantic_story_qa(path, payload, duration):
             "model": model_name,
         }
     except Exception as e:
+        raw_snippet = ""
+        try:
+            raw_snippet = re.sub(r"\s+", " ", str(raw_text)).strip()[:900]
+        except Exception:
+            pass
+        reason = f"KIE_vision_api_or_parse_error: {type(e).__name__}: {e}"
+        if raw_snippet:
+            reason += f" | raw={raw_snippet}"
         return {
             "status": "ERROR",
             "confidence": 0.0,
-            "reason": f"KIE_vision_api_or_parse_error: {type(e).__name__}: {e}",
+            "reason": reason[:1600],
             "blocking": True,
             "provider": "kie.ai",
             "model": model_name,
