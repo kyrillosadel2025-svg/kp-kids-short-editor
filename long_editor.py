@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.3
+"""KP Kids Long Video Editor V1.4
 
 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts.
 - Prefers archived Google Drive RAWs, falls back to original video URLs.
@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.3 - Side Glow Motion + Strict Landscape Branding"
+EDITOR_VERSION = "KP Kids Long Editor V1.4 - Smart Pacing + Question Answer Side Sync"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
@@ -45,6 +45,16 @@ AUDIO_BITRATE = "128k"
 FOREGROUND_H = 1010
 SEGMENT_FADE = 0.18
 MUSIC_GAIN = 0.72
+
+# Same pacing philosophy as the Shorts editor.
+LONG_BODY_TARGET_SPEED = 0.95
+LONG_SPEECH_SPEED = 0.99
+LONG_SHORT_PAUSE_SPEED = 0.96
+LONG_MEDIUM_PAUSE_SPEED = 0.93
+LONG_LONG_PAUSE_SPEED = 0.90
+LONG_MIN_PACING_SEGMENT = 0.08
+LONG_SILENCE_DB = -33
+LONG_SILENCE_MIN_DURATION = 0.22
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
@@ -248,6 +258,256 @@ def sanitize_text(s):
 
 
 
+
+def detect_silence_intervals(path, duration):
+    if not has_audio(path) or duration <= 0:
+        return []
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-t", f"{duration:.3f}", "-i", str(path),
+        "-af", f"silencedetect=noise={LONG_SILENCE_DB}dB:d={LONG_SILENCE_MIN_DURATION}",
+        "-f", "null", "-"
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", text)]
+    ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", text)]
+    intervals = []
+    for i, st in enumerate(starts):
+        en = ends[i] if i < len(ends) else duration
+        st = max(0.0, min(st, duration))
+        en = max(st, min(en, duration))
+        if en - st >= LONG_SILENCE_MIN_DURATION - 0.01:
+            intervals.append((st, en))
+    merged = []
+    for st, en in sorted(intervals):
+        if merged and st <= merged[-1][1] + 0.03:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return merged
+
+
+def pause_speed(length):
+    if length >= 0.85:
+        return LONG_LONG_PAUSE_SPEED
+    if length >= 0.45:
+        return LONG_MEDIUM_PAUSE_SPEED
+    return LONG_SHORT_PAUSE_SPEED
+
+
+def build_pacing_plan(duration, silence_intervals):
+    if duration <= 0:
+        return {"segments": [], "output_duration": 0.0, "target_duration": 0.0, "silence_count": 0}
+
+    marks = {0.0, duration}
+    for st, en in silence_intervals:
+        marks.add(max(0.0, min(st, duration)))
+        marks.add(max(0.0, min(en, duration)))
+    marks = sorted(marks)
+
+    raw = []
+    for a, b in zip(marks, marks[1:]):
+        if b - a < LONG_MIN_PACING_SEGMENT:
+            continue
+        mid = (a + b) / 2.0
+        is_silence = any(st <= mid <= en for st, en in silence_intervals)
+        raw.append({
+            "source_start": a,
+            "source_end": b,
+            "kind": "silence" if is_silence else "speech",
+            "speed": pause_speed(b-a) if is_silence else LONG_SPEECH_SPEED,
+        })
+
+    if not raw:
+        raw = [{
+            "source_start": 0.0,
+            "source_end": duration,
+            "kind": "speech",
+            "speed": LONG_BODY_TARGET_SPEED,
+        }]
+
+    target_duration = duration / LONG_BODY_TARGET_SPEED
+    current = sum((x["source_end"] - x["source_start"]) / x["speed"] for x in raw)
+    factor = current / target_duration if target_duration > 0 else 1.0
+
+    for x in raw:
+        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
+
+    out_t = 0.0
+    segments = []
+    for x in raw:
+        seg = dict(x)
+        seg["output_start"] = out_t
+        seg_dur = (seg["source_end"] - seg["source_start"]) / seg["speed"]
+        out_t += seg_dur
+        seg["output_end"] = out_t
+        segments.append(seg)
+
+    return {
+        "segments": segments,
+        "output_duration": out_t,
+        "target_duration": target_duration,
+        "silence_count": len(silence_intervals),
+    }
+
+
+def map_source_time_to_output(seconds, pacing_plan):
+    try:
+        t = max(0.0, float(seconds))
+    except Exception:
+        return None
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return t / LONG_BODY_TARGET_SPEED
+    for seg in segs:
+        if t <= seg["source_end"] + 1e-6:
+            local = max(0.0, t - seg["source_start"])
+            return seg["output_start"] + local / seg["speed"]
+    return pacing_plan.get("output_duration", t / LONG_BODY_TARGET_SPEED)
+
+
+def build_paced_video_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:v]setpts=PTS/{LONG_BODY_TARGET_SPEED:.5f}[pacedv];"
+    parts, labels = [], []
+    for i, seg in enumerate(segs):
+        label = f"pv{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:v]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"setpts=(PTS-STARTPTS)/{seg['speed']:.6f},settb=AVTB[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=1:a=0[pacedv];")
+    return "".join(parts)
+
+
+def build_paced_audio_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:a]atempo={LONG_BODY_TARGET_SPEED:.5f}[paceda];"
+    parts, labels = [], []
+    for i, seg in enumerate(segs):
+        label = f"pa{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:a]atrim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"asetpts=PTS-STARTPTS,atempo={seg['speed']:.6f}[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=0:a=1[paceda];")
+    return "".join(parts)
+
+
+def create_paced_clip(src, dest, pacing_plan):
+    """Apply the variable pacing to video AND original audio before landscape composition."""
+    audio = has_audio(src)
+    fc = build_paced_video_prefix(pacing_plan)
+
+    cmd = ["ffmpeg", "-y", "-i", str(src)]
+    if audio:
+        fc += build_paced_audio_prefix(pacing_plan)
+        fc += (
+            f"[pacedv]fps={OUTPUT_FPS},format=yuv420p[v];"
+            f"[paceda]aresample={AUDIO_RATE},aformat=channel_layouts=stereo[a]"
+        )
+        cmd += [
+            "-filter_complex", fc,
+            "-map", "[v]", "-map", "[a]",
+        ]
+    else:
+        dur = pacing_plan.get("output_duration") or max(0.5, ffprobe_duration(src) / LONG_BODY_TARGET_SPEED)
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
+        fc += f"[pacedv]fps={OUTPUT_FPS},format=yuv420p[v]"
+        cmd += [
+            "-filter_complex", fc,
+            "-map", "[v]", "-map", "1:a:0",
+        ]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
+        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
+        "-movflags", "+faststart", "-shortest", str(dest)
+    ]
+    run(cmd)
+
+
+def parse_timeline_segment(timeline, keywords):
+    text = str(timeline or "")
+    for line in text.splitlines():
+        low = line.lower()
+        if not any(k in low for k in keywords):
+            continue
+        m = re.search(r"(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+        m = re.search(r"(?:at\s*)?(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
+        if m:
+            t = float(m.group(1))
+            return t, t + 0.8
+    return None
+
+
+def choose_answer_time_from_silence(silence_intervals, duration):
+    """Answer often begins right after the main thinking pause."""
+    lo, hi = duration * 0.18, duration * 0.62
+    candidates = []
+    target = duration * 0.36
+    for st, en in silence_intervals:
+        mid = (st + en) / 2.0
+        if lo <= mid <= hi and en - st >= 0.26:
+            score = abs(mid - target) - min(en-st, 1.4) * 0.30
+            candidates.append((score, en + 0.04))
+    return min(candidates)[1] if candidates else None
+
+
+def derive_question_from_title(title):
+    first = clean_display_title(title).split("|")[0].strip()
+    return first if "?" in first else ""
+
+
+def build_qa_timing(clip, source_duration, pacing_plan, silence_intervals):
+    timeline = clip.get("dialogue_timeline") or ""
+    q_seg = parse_timeline_segment(timeline, [" asks ", "asks only", "question"])
+    a_seg = parse_timeline_segment(timeline, ["reveal/answer", "answer.", "answer ", "correct", "result"])
+
+    answer_src = a_seg[0] if a_seg else choose_answer_time_from_silence(silence_intervals, source_duration)
+    if answer_src is None:
+        answer_src = source_duration * 0.35
+
+    if q_seg:
+        q_start_src, q_end_src = q_seg
+    else:
+        q_start_src = 0.55 if source_duration >= 6 else source_duration * 0.08
+        q_end_src = min(answer_src - 0.25, q_start_src + 2.4)
+
+    if a_seg:
+        a_start_src, a_end_src = a_seg
+    else:
+        a_start_src = answer_src
+        a_end_src = min(source_duration - 0.15, a_start_src + 1.5)
+
+    q_start = map_source_time_to_output(q_start_src, pacing_plan)
+    q_end = map_source_time_to_output(max(q_start_src + 0.7, q_end_src + 0.25), pacing_plan)
+    a_start = map_source_time_to_output(a_start_src, pacing_plan)
+    a_end = map_source_time_to_output(min(source_duration, max(a_start_src + 1.25, a_end_src + 1.0)), pacing_plan)
+
+    out_dur = pacing_plan.get("output_duration") or source_duration / LONG_BODY_TARGET_SPEED
+    q_start = max(0.18, min(q_start or 0.5, out_dur - 1.5))
+    a_start = max(q_start + 0.8, min(a_start or out_dur * 0.36, out_dur - 1.0))
+    q_end = min(max(q_start + 1.0, q_end or a_start - 0.2), a_start - 0.12)
+    a_end = min(out_dur - 0.18, max(a_start + 1.25, a_end or a_start + 2.1))
+
+    return {
+        "question_start": q_start,
+        "question_end": q_end,
+        "answer_start": a_start,
+        "answer_end": a_end,
+        "question_source_start": q_start_src,
+        "answer_source_start": a_start_src,
+    }
+
+
 CATEGORY_LABELS = {
     "alphabet":"ALPHABET", "letters":"LETTER MATCH", "phonics":"PHONICS",
     "numbers":"NUMBERS", "counting":"COUNTING", "shapes":"SHAPES",
@@ -365,14 +625,18 @@ def fade_alpha_expr(start, end, fade=0.28):
     )
 
 
-def build_side_graphics_filters(clip, duration, clip_index, clip_total, work_dir):
-    """Return drawtext filters placed only in the side gutters."""
+def build_side_graphics_filters(
+    clip, duration, clip_index, clip_total, work_dir,
+    qa_timing=None, qa_sync_enabled=True
+):
+    """Category on the left; spoken question then spoken answer on the right."""
     category = str(clip.get("category") or "").strip().lower()
     accent = category_accent(category)
     label = category_label(category)
     series = sanitize_text(clip.get("series_name") or "")
-    title = clean_display_title(clip.get("title") or clip.get("topic") or "")
-    keyword = derive_side_keyword(clip)
+
+    question = sanitize_text(clip.get("question_line") or "") or derive_question_from_title(clip.get("title") or "")
+    answer = sanitize_text(clip.get("answer_line") or "")
 
     if series:
         left_label = f"{label}\n{series[:34]}"
@@ -380,37 +644,12 @@ def build_side_graphics_filters(clip, duration, clip_index, clip_total, work_dir
         left_label = label
 
     left_text = write_text_file(Path(work_dir) / f"side_left_{clip_index:02d}.txt", left_label)
-    title_text = write_text_file(
-        Path(work_dir) / f"side_title_{clip_index:02d}.txt",
-        wrap_side_text(title, max_chars=18, max_lines=3)
-    )
-    keyword_text = write_text_file(
-        Path(work_dir) / f"side_keyword_{clip_index:02d}.txt",
-        wrap_side_text(keyword.upper(), max_chars=16, max_lines=2)
-    )
-    count_text = write_text_file(
-        Path(work_dir) / f"side_count_{clip_index:02d}.txt",
-        f"{clip_index} / {clip_total}"
-    )
 
-    title_end = min(max(2.2, duration - 0.35), 4.3)
-    kw_start = min(max(3.8, duration * 0.38), max(0.6, duration - 2.5))
-    kw_end = min(duration - 0.28, kw_start + 2.8)
-    if kw_end <= kw_start + 0.5:
-        kw_start = max(0.6, duration * 0.45)
-        kw_end = max(kw_start + 0.5, duration - 0.25)
-
-    cat_alpha = fade_alpha_expr(0.15, max(0.7, duration - 0.2), 0.30)
-    title_alpha = fade_alpha_expr(0.22, title_end, 0.32)
-    kw_alpha = fade_alpha_expr(kw_start, kw_end, 0.28)
-
-    # Slight entrance travel, then settle. Text remains in the side gutter.
-    title_x = f"if(lt(t,0.70),{RIGHT_X}+70*(0.70-t)/0.48,{RIGHT_X})"
-    kw_x = f"if(lt(t,{kw_start+0.48:.3f}),{RIGHT_X}+50*({kw_start+0.48:.3f}-t)/0.48,{RIGHT_X})"
-
+    # User requested NO "1 / 4" or clip counter.
     filters = []
+    cat_alpha = fade_alpha_expr(0.15, max(0.7, duration - 0.2), 0.30)
 
-    # LEFT: persistent series/category identity and clip number.
+    # LEFT — persistent identity only.
     filters.append(drawtext_file_filter(
         left_text, FONT, f"{accent}@0.16", 34, LEFT_X, SIDE_CATEGORY_Y,
         cat_alpha, borderw=10, bordercolor=f"{accent}@0.13", line_spacing=10
@@ -419,39 +658,76 @@ def build_side_graphics_filters(clip, duration, clip_index, clip_total, work_dir
         left_text, FONT, "white@0.92", 34, LEFT_X, SIDE_CATEGORY_Y,
         cat_alpha, borderw=2, bordercolor=f"{accent}@0.92", line_spacing=10
     ))
-    filters.append(drawtext_file_filter(
-        count_text, FONT, "white@0.68", 25, LEFT_X, 285,
-        cat_alpha, borderw=1, bordercolor="black@0.20", line_spacing=4
-    ))
 
-    # RIGHT: title enters first with the same clean glow language as Shorts.
-    filters.append(drawtext_file_filter(
-        title_text, FONT_ITALIC, f"{accent}@0.18", 46, title_x, SIDE_TITLE_Y,
-        title_alpha, borderw=12, bordercolor=f"{accent}@0.15", line_spacing=10
-    ))
-    filters.append(drawtext_file_filter(
-        title_text, FONT_ITALIC, "white@0.98", 46, title_x, SIDE_TITLE_Y,
-        title_alpha, borderw=2, bordercolor=f"{accent}@0.98", line_spacing=10
-    ))
-
-    # RIGHT LOWER: later keyword/reveal echo, also glow-only.
-    filters.append(drawtext_file_filter(
-        keyword_text, FONT_ITALIC, f"{accent}@0.20", 54, kw_x, SIDE_KEYWORD_Y,
-        kw_alpha, borderw=15, bordercolor=f"{accent}@0.15", line_spacing=9
-    ))
-    filters.append(drawtext_file_filter(
-        keyword_text, FONT_ITALIC, "white@0.98", 54, kw_x, SIDE_KEYWORD_Y,
-        kw_alpha, borderw=2, bordercolor=f"{accent}@0.98", line_spacing=9
-    ))
-
-    return filters, {
+    meta = {
         "category_label": label,
         "accent": accent,
-        "title": title,
-        "keyword": keyword,
+        "question": question,
+        "answer": answer,
         "clip_index": clip_index,
         "clip_total": clip_total,
+        "counter_drawn": False,
     }
+
+    if not qa_sync_enabled:
+        return filters, meta
+
+    timing = qa_timing or {
+        "question_start": 0.45,
+        "question_end": min(3.0, duration * 0.28),
+        "answer_start": min(4.2, duration * 0.38),
+        "answer_end": min(duration - 0.2, 6.8),
+    }
+
+    # Question appears while the lead asks it.
+    if question:
+        q_text = write_text_file(
+            Path(work_dir) / f"side_question_{clip_index:02d}.txt",
+            wrap_side_text(question, max_chars=19, max_lines=3)
+        )
+        qs, qe = timing["question_start"], timing["question_end"]
+        q_alpha = fade_alpha_expr(qs, qe, 0.25)
+        q_x = f"if(lt(t,{qs+0.42:.3f}),{RIGHT_X}+55*({qs+0.42:.3f}-t)/0.42,{RIGHT_X})"
+
+        filters.append(drawtext_file_filter(
+            q_text, FONT_ITALIC, f"{accent}@0.17", 43, q_x, SIDE_TITLE_Y,
+            q_alpha, borderw=11, bordercolor=f"{accent}@0.14", line_spacing=10
+        ))
+        filters.append(drawtext_file_filter(
+            q_text, FONT_ITALIC, "white@0.98", 43, q_x, SIDE_TITLE_Y,
+            q_alpha, borderw=2, bordercolor=f"{accent}@0.96", line_spacing=10
+        ))
+
+    # Answer replaces the question exactly around the spoken reveal.
+    if answer:
+        a_text = write_text_file(
+            Path(work_dir) / f"side_answer_{clip_index:02d}.txt",
+            wrap_side_text(answer.upper(), max_chars=16, max_lines=2)
+        )
+        ast, aen = timing["answer_start"], timing["answer_end"]
+        a_alpha = fade_alpha_expr(ast, aen, 0.24)
+        a_x = f"if(lt(t,{ast+0.48:.3f}),{RIGHT_X}+72*({ast+0.48:.3f}-t)/0.48,{RIGHT_X})"
+
+        # Wide soft halo + brighter entrance pulse + crisp core.
+        filters.append(drawtext_file_filter(
+            a_text, FONT_ITALIC, f"{accent}@0.20", 56, a_x, SIDE_KEYWORD_Y,
+            a_alpha, borderw=15, bordercolor=f"{accent}@0.15", line_spacing=9
+        ))
+
+        pulse_end = min(aen, ast + 0.58)
+        pulse_alpha = fade_alpha_expr(ast, pulse_end, 0.16)
+        filters.append(drawtext_file_filter(
+            a_text, FONT_ITALIC, f"{accent}@0.17", 58, a_x, SIDE_KEYWORD_Y,
+            pulse_alpha, borderw=20, bordercolor=f"{accent}@0.12", line_spacing=9
+        ))
+
+        filters.append(drawtext_file_filter(
+            a_text, FONT_ITALIC, "white@0.99", 56, a_x, SIDE_KEYWORD_Y,
+            a_alpha, borderw=2, bordercolor=f"{accent}@0.99", line_spacing=9
+        ))
+
+    meta["qa_timing"] = timing
+    return filters, meta
 
 
 def normalize_brand_clip(src, dest):
@@ -480,12 +756,41 @@ def normalize_brand_clip(src, dest):
     run(cmd)
 
 
-def normalize_vertical_clip(src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True):
-    """Turn a vertical RAW short into a 16:9 scene with optional side-gutter motion graphics."""
+def normalize_vertical_clip(
+    src, dest, clip=None, clip_index=1, clip_total=1,
+    side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True
+):
+    """Smart-pace a Short, then place it untouched in the center of a 16:9 canvas."""
     clip = clip or {}
-    dur = max(0.5, ffprobe_duration(src))
-    audio = has_audio(src)
+    source_dur = max(0.5, ffprobe_duration(src))
+    silence_intervals = detect_silence_intervals(src, source_dur) if smart_pacing_enabled else []
+    pacing_plan = (
+        build_pacing_plan(source_dur, silence_intervals)
+        if smart_pacing_enabled
+        else {
+            "segments": [{"source_start":0.0,"source_end":source_dur,"kind":"speech","speed":1.0,
+                          "output_start":0.0,"output_end":source_dur}],
+            "output_duration": source_dur,
+            "target_duration": source_dur,
+            "silence_count": 0,
+        }
+    )
+
+    paced_src = Path(dest).with_name(Path(dest).stem + "_paced.mp4")
+    if smart_pacing_enabled:
+        create_paced_clip(src, paced_src, pacing_plan)
+    else:
+        # Still normalize container/audio layout once for predictable composition.
+        run([
+            "ffmpeg","-y","-i",str(src),
+            "-c:v","libx264","-preset","veryfast",
+            "-c:a","aac","-b:a",AUDIO_BITRATE,"-ar",str(AUDIO_RATE),"-ac","2",
+            "-movflags","+faststart",str(paced_src)
+        ])
+
+    dur = max(0.5, ffprobe_duration(paced_src))
     fade_out = max(0.0, dur - SEGMENT_FADE)
+    qa_timing = build_qa_timing(clip, source_dur, pacing_plan, silence_intervals)
 
     base_graph = (
         f"[0:v]split=2[bg][fg];"
@@ -499,7 +804,8 @@ def normalize_vertical_clip(src, dest, clip=None, clip_index=1, clip_total=1, si
     graphic_meta = {}
     if side_graphics_enabled:
         filters, graphic_meta = build_side_graphics_filters(
-            clip, dur, clip_index, clip_total, Path(dest).parent
+            clip, dur, clip_index, clip_total, Path(dest).parent,
+            qa_timing=qa_timing, qa_sync_enabled=qa_sync_enabled
         )
         chain = "[base]"
         for i, flt in enumerate(filters):
@@ -518,20 +824,17 @@ def normalize_vertical_clip(src, dest, clip=None, clip_index=1, clip_total=1, si
             f"fps={OUTPUT_FPS},format=yuv420p[v]"
         )
 
-    cmd = ["ffmpeg", "-y", "-i", str(src)]
-    if not audio:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
-    cmd += ["-filter_complex", base_graph, "-map", "[v]"]
-
-    if audio:
+    cmd = ["ffmpeg", "-y", "-i", str(paced_src), "-filter_complex", base_graph, "-map", "[v]"]
+    if has_audio(paced_src):
         cmd += [
-            "-map", "0:a:0", "-af",
+            "-map", "0:a:0",
+            "-af",
             f"aresample=48000,afade=t=in:st=0:d={SEGMENT_FADE:.2f},"
             f"afade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
             "loudnorm=I=-15:LRA=11:TP=-1.5"
         ]
     else:
-        cmd += ["-map", "1:a:0"]
+        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo", "-map", "1:a:0"]
 
     cmd += [
         "-r", str(OUTPUT_FPS), "-c:v", "libx264", "-preset", "veryfast",
@@ -540,7 +843,22 @@ def normalize_vertical_clip(src, dest, clip=None, clip_index=1, clip_total=1, si
         "-movflags", "+faststart", "-shortest", str(dest)
     ]
     run(cmd)
-    return dur, graphic_meta
+
+    pacing_meta = {
+        "source_duration": round(source_dur, 3),
+        "output_duration": round(dur, 3),
+        "silence_count": len(silence_intervals),
+        "segments": [
+            {
+                "kind": x["kind"],
+                "source_start": round(x["source_start"], 3),
+                "source_end": round(x["source_end"], 3),
+                "speed": round(x["speed"], 4),
+            }
+            for x in pacing_plan.get("segments", [])
+        ],
+    }
+    return dur, graphic_meta, pacing_meta
 
 
 def concat_files(files, dest):
@@ -692,9 +1010,13 @@ def main():
         norm = work / f"clip_{idx:02d}_landscape.mp4"
         try:
             side_graphics_enabled = payload_bool(payload, "side_graphics_enabled", True)
-            dur, graphic_meta = normalize_vertical_clip(
+            smart_pacing_enabled = payload_bool(payload, "smart_pacing_enabled", True)
+            qa_sync_enabled = payload_bool(payload, "qa_sync_enabled", True)
+            dur, graphic_meta, pacing_meta = normalize_vertical_clip(
                 raw, norm, clip=clip, clip_index=idx, clip_total=len(clips),
-                side_graphics_enabled=side_graphics_enabled
+                side_graphics_enabled=side_graphics_enabled,
+                smart_pacing_enabled=smart_pacing_enabled,
+                qa_sync_enabled=qa_sync_enabled
             )
             normalized.append(norm)
             used.append({
@@ -703,6 +1025,7 @@ def main():
                 "category": str(clip.get("category") or ""),
                 "duration": round(dur, 3),
                 "side_graphics": graphic_meta,
+                "pacing": pacing_meta,
             })
         except Exception as e:
             print(f"Clip {idx}: normalize failed: {e}", flush=True)
@@ -791,7 +1114,10 @@ def main():
         "clips_failed": failed,
         "music_result": music_result,
         "side_graphics_enabled": payload_bool(payload, "side_graphics_enabled", True),
-        "side_graphics_style": "shorts-inspired glow side gutters",
+        "side_graphics_style": "category left + spoken question/answer right",
+        "smart_pacing_enabled": payload_bool(payload, "smart_pacing_enabled", True),
+        "qa_sync_enabled": payload_bool(payload, "qa_sync_enabled", True),
+        "pacing_mode": "silence-aware variable speed, Shorts-inspired",
         "branding": brand_meta,
         "intro_drive_file_id": intro_drive_file_id if include_intro else "",
         "closure_drive_file_id": closure_drive_file_id if include_closure else "",
