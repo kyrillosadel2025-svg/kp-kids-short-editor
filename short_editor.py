@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V7.9: Strong Kinetic Text + Interactive Intro/Closure Options
+# KP Kids Short Editor V8.0: Interactive Edit + Guaranteed Original Music Bed
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -23,6 +23,9 @@ import hashlib
 import http.cookiejar
 import json
 import re
+import math
+import random
+import wave
 import html
 import shutil
 import subprocess
@@ -46,7 +49,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V7.9 Strong Kinetic Text + Interactive Intro/Closure Options"
+EDITOR_VERSION = "V8.0 Guaranteed Original Music + Interactive Intro/Closure"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1502,6 +1505,169 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
         parts.append("[amain]anull[aout]")
     return "".join(parts)
 
+
+# ---------------------------------------------------------------------------
+# GUARANTEED ORIGINAL BACKGROUND MUSIC
+# ---------------------------------------------------------------------------
+# The generator below creates a small original instrumental bed locally. It uses
+# only synthesized tones/noise, so the editor never depends on Grok deciding to
+# create music and never needs a third-party/copyrighted music file.
+
+def _music_profile(payload):
+    mode = str(payload.get("content_mode") or "education").strip().lower()
+    category = str(payload.get("category") or "").strip().lower()
+    style = str(payload.get("music_style") or "").strip().lower()
+    text = f"{mode} {category} {style}"
+
+    if mode == "entertainment" or any(k in text for k in ["dance", "bouncy", "clap", "toy-drum", "rhythm"]):
+        return {"name":"playful_dance", "tempo":124, "root":293.66, "gain":0.145, "duck_gain":0.035, "swing":0.035, "percussion":1.0}
+    if any(k in text for k in ["calm", "sleep", "night", "gentle", "mindful"]):
+        return {"name":"calm_warm", "tempo":88, "root":261.63, "gain":0.090, "duck_gain":0.022, "swing":0.0, "percussion":0.28}
+    if any(k in text for k in ["mystery", "guess", "space"]):
+        return {"name":"curious_space", "tempo":104, "root":293.66, "gain":0.105, "duck_gain":0.026, "swing":0.018, "percussion":0.50}
+    if any(k in text for k in ["nature", "weather", "ukulele", "acoustic"]):
+        return {"name":"sunny_plucks", "tempo":108, "root":261.63, "gain":0.105, "duck_gain":0.026, "swing":0.018, "percussion":0.44}
+    return {"name":"learning_plucks", "tempo":106, "root":261.63, "gain":0.105, "duck_gain":0.026, "swing":0.015, "percussion":0.42}
+
+
+def generate_original_music_bed(dest, duration, payload):
+    """Generate deterministic, original, child-friendly instrumental WAV."""
+    profile = _music_profile(payload)
+    sr = 24000
+    total = max(1, int(float(duration) * sr))
+    samples = [0.0] * total
+
+    seed_text = "|".join(str(payload.get(k, "")) for k in ["short_id","lesson_key","topic","category","content_mode"])
+    seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:16], 16)
+    rng = random.Random(seed)
+
+    root = profile["root"]
+    # Major pentatonic gives a reliably upbeat preschool sound without imitating a song.
+    ratios = [1.0, 9/8, 5/4, 3/2, 5/3, 2.0]
+    melody = [0, 2, 4, 2, 1, 3, 4, 3, 0, 2, 3, 1, 0, 4, 2, 1]
+    if profile["name"] == "curious_space":
+        melody = [0, 3, 1, 4, 2, 3, 0, 4, 1, 3, 2, 5, 4, 2, 1, 0]
+    elif profile["name"] == "calm_warm":
+        melody = [0, 2, 3, 2, 0, 1, 2, 1, 0, 2, 4, 2, 1, 0, 1, 2]
+
+    def add_tone(start_s, dur_s, freq, amp, bell=False):
+        start = int(max(0.0, start_s) * sr)
+        count = min(int(dur_s * sr), total - start)
+        if count <= 0:
+            return
+        attack = max(1, int(0.018 * sr))
+        for i in range(count):
+            t = i / sr
+            a = min(1.0, i / attack) * math.exp(-4.6 * t / max(dur_s, 0.05))
+            v = math.sin(2 * math.pi * freq * t)
+            v += 0.22 * math.sin(2 * math.pi * freq * 2.0 * t)
+            if bell:
+                v += 0.10 * math.sin(2 * math.pi * freq * 3.01 * t)
+            samples[start+i] += amp * a * v
+
+    def add_kick(start_s, amp):
+        start = int(start_s * sr)
+        count = min(int(0.115 * sr), total - start)
+        for i in range(max(0, count)):
+            t = i / sr
+            freq = 105 - 58 * min(1.0, t / 0.115)
+            env = math.exp(-26 * t)
+            samples[start+i] += amp * env * math.sin(2 * math.pi * freq * t)
+
+    def add_tick(start_s, amp):
+        start = int(start_s * sr)
+        count = min(int(0.045 * sr), total - start)
+        for i in range(max(0, count)):
+            t = i / sr
+            env = math.exp(-65 * t)
+            samples[start+i] += amp * env * (rng.random() * 2.0 - 1.0)
+
+    beat = 60.0 / profile["tempo"]
+    eighth = beat / 2.0
+    steps = int(math.ceil(duration / eighth)) + 1
+    for step_idx in range(steps):
+        swing = profile["swing"] if step_idx % 2 else 0.0
+        st = step_idx * eighth + swing
+        if st >= duration:
+            break
+        note_idx = melody[step_idx % len(melody)]
+        # Tiny deterministic variation prevents every episode using an identical tune.
+        if step_idx % 8 == 6 and rng.random() > 0.45:
+            note_idx = min(5, note_idx + 1)
+        freq = root * ratios[note_idx]
+        note_amp = 0.105 if profile["name"] == "playful_dance" else 0.085
+        if profile["name"] == "calm_warm":
+            note_amp = 0.060
+        add_tone(st, min(0.34, eighth * 0.92), freq, note_amp, bell=True)
+
+        if step_idx % 2 == 0:
+            # Low root/fifth pulse anchors the beat softly.
+            low = (root / 2.0) * (1.5 if (step_idx // 2) % 4 in [1,3] else 1.0)
+            add_tone(st, min(0.30, beat * 0.55), low, 0.032 + 0.018 * profile["percussion"], bell=False)
+        if step_idx % 4 == 0:
+            add_kick(st, 0.035 * profile["percussion"])
+        elif step_idx % 2 == 1:
+            add_tick(st, 0.017 * profile["percussion"])
+
+    # Gentle held harmony every two beats.
+    bar = beat * 4
+    t = 0.0
+    chord_cycle = [(0,2,4), (1,3,5), (0,2,4), (0,3,4)]
+    ci = 0
+    while t < duration:
+        chord = chord_cycle[ci % len(chord_cycle)]
+        for idx in chord:
+            add_tone(t, min(bar * 0.92, duration - t), (root/2.0)*ratios[idx], 0.012 if profile["name"] != "calm_warm" else 0.009, bell=False)
+        t += bar
+        ci += 1
+
+    peak = max((abs(x) for x in samples), default=1.0)
+    scale = 0.82 / peak if peak > 0.82 else 1.0
+    with wave.open(str(dest), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        chunk = bytearray()
+        for x in samples:
+            v = int(max(-1.0, min(1.0, x * scale)) * 32767)
+            chunk += int(v).to_bytes(2, byteorder="little", signed=True)
+        wf.writeframes(chunk)
+    return profile
+
+
+def _music_duck_expr(speech_windows, normal_gain, duck_gain):
+    expr = f"{normal_gain:.4f}"
+    # Explicit dialogue windows keep the generated music lower while anyone speaks.
+    for st, en in reversed((speech_windows or [])[:24]):
+        expr = f"if(between(t,{max(0.0,st):.3f},{max(st,en):.3f}),{duck_gain:.4f},{expr})"
+    return expr
+
+
+def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows, payload, profile=None):
+    profile = profile or _music_profile(payload)
+    volume_expr = _music_duck_expr(speech_windows, profile["gain"], profile["duck_gain"])
+    fade_out = max(0.0, float(duration) - 0.45)
+    fc = (
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+        "highpass=f=90,lowpass=f=9000,"
+        f"volume='{volume_expr}':eval=frame,"
+        "afade=t=in:st=0:d=0.30,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.45[music];"
+        "[main][music]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.94[aout]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_in), "-i", str(music_wav),
+        "-filter_complex", fc,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
+    ]
+    run(cmd)
+    return profile
+
 def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP_SECONDS):
     """Normalize intro/closure to output format and retime to a concise 3s+ branding clip.
 
@@ -1716,10 +1882,25 @@ def main():
         closure_raw = td / "kp_kids_closure_raw.mp4"
         closure_norm = td / "kp_kids_closure_normalized.mp4"
         edited_body = td / "kp_kids_edited_body.mp4"
+        edited_body_music = td / "kp_kids_edited_body_music.mp4"
+        music_bed_wav = td / "kp_kids_original_music.wav"
         body_with_intro = td / "kp_kids_with_intro.mp4"
 
         download(source_url, src)
         result = edit_video(src, edited_body, payload)
+
+        # Guaranteed original music bed: generated locally, then ducked under detected speech.
+        # This removes dependence on the video model deciding whether to create music.
+        music_bed_enabled = payload_bool("music_bed_enabled", True)
+        body_for_branding = edited_body
+        music_profile = None
+        if music_bed_enabled:
+            music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
+            mix_original_music_bed(
+                edited_body, music_bed_wav, edited_body_music,
+                result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
+            )
+            body_for_branding = edited_body_music
 
         # Brand clips are now controlled by the Telegram review choice.
         # The Smart Edit body is ALWAYS rendered; intro/closure are optional.
@@ -1733,7 +1914,7 @@ def main():
 
         if include_intro and include_closure:
             prepend_intro(
-                intro_norm, edited_body, body_with_intro,
+                intro_norm, body_for_branding, body_with_intro,
                 xfade_dur=result["transition_plan"]["intro_xfade"]
             )
             append_closure(
@@ -1742,16 +1923,16 @@ def main():
             )
         elif include_intro:
             prepend_intro(
-                intro_norm, edited_body, Path(args.output),
+                intro_norm, body_for_branding, Path(args.output),
                 xfade_dur=result["transition_plan"]["intro_xfade"]
             )
         elif include_closure:
             append_closure(
-                edited_body, closure_norm, Path(args.output),
+                body_for_branding, closure_norm, Path(args.output),
                 xfade_dur=result["transition_plan"]["closure_xfade"]
             )
         else:
-            shutil.copyfile(edited_body, Path(args.output))
+            shutil.copyfile(body_for_branding, Path(args.output))
 
     meta = dict(payload)
     meta["editor_version"] = EDITOR_VERSION
@@ -1780,6 +1961,12 @@ def main():
     meta["intro_prepend_enabled"] = include_intro
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
     meta["closure_append_enabled"] = include_closure
+    meta["music_bed_enabled"] = bool(payload.get("music_bed_enabled", True))
+    meta["music_bed_source"] = "procedural_original_synth" if meta["music_bed_enabled"] else "disabled"
+    try:
+        meta["music_profile"] = music_profile if music_profile is not None else _music_profile(payload)
+    except Exception:
+        meta["music_profile"] = {}
     try:
         meta["final_output_info"] = ffprobe_video_info(Path(args.output))
     except Exception as e:
