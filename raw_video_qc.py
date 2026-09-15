@@ -156,6 +156,17 @@ def _kie_chat_output_text(obj):
     if isinstance(data, dict):
         candidates.append(data)
 
+    # KIE Logs may expose the model's JSON result directly rather than an
+    # OpenAI-style choices envelope. Preserve it as JSON text so the same
+    # downstream parser can handle it.
+    for root in candidates:
+        if isinstance(root, dict) and (
+            "reveal_assessment" in root
+            or "status" in root
+            or "early_reveal_classification" in root
+        ):
+            return json.dumps(root, ensure_ascii=False)
+
     for root in candidates:
         choices = root.get("choices")
         if isinstance(choices, list) and choices:
@@ -211,6 +222,86 @@ def _kie_chat_output_text(obj):
             detail["data_msg"] = data.get("msg") or data.get("message") or data.get("error")
     raise RuntimeError("KIE non-chat response: " + json.dumps(detail, ensure_ascii=False)[:900])
 
+
+
+def _normalize_kie_verdict(verdict):
+    """Normalize KIE's observed reveal_assessment shape and our preferred schema. KIE may return either the exact JSON requested by the prompt or a provider- generated object like {"reveal_assessment": {...}}. Do not invent a model confidence when KIE did not provide one; an explicit early-reveal classification is still treated as blocking. """
+    if not isinstance(verdict, dict):
+        raise RuntimeError("KIE verdict is not a JSON object")
+
+    # Unwrap common containers first.
+    for key in ("data", "result", "output"):
+        value = verdict.get(key)
+        if isinstance(value, dict):
+            # Prefer a nested assessment/status object if present.
+            if "reveal_assessment" in value or "status" in value or "early_reveal_classification" in value:
+                verdict = value
+                break
+
+    # Preferred schema from our prompt.
+    if "status" in verdict:
+        return verdict
+
+    assessment = verdict.get("reveal_assessment")
+    if not isinstance(assessment, dict):
+        # Some responses may return the assessment object directly.
+        if "early_reveal_classification" in verdict:
+            assessment = verdict
+        else:
+            raise RuntimeError("KIE verdict missing status/reveal_assessment")
+
+    raw_class = str(
+        assessment.get("early_reveal_classification")
+        or assessment.get("classification")
+        or assessment.get("status")
+        or "UNCERTAIN"
+    ).strip().upper().replace(" ", "_").replace("-", "_")
+
+    # Robust mapping for observed/truncated/provider wording.
+    if raw_class.startswith("PERSISTENT_EARLY_REVE"):
+        status = "PERSISTENT_EARLY_REVEAL"
+    elif raw_class.startswith("EARLY_REVEAL_MOVABLE") or raw_class.startswith("MOVABLE_EARLY_REVEAL"):
+        status = "EARLY_REVEAL_MOVABLE"
+    elif raw_class.startswith("CORRECT_REVEAL") or raw_class in {"PASS", "OK", "SAFE"}:
+        status = "CORRECT_REVEAL"
+    elif "PERSISTENT" in raw_class and "EARLY" in raw_class:
+        status = "PERSISTENT_EARLY_REVEAL"
+    elif "EARLY" in raw_class and "REVEAL" in raw_class:
+        status = "EARLY_REVEAL_MOVABLE"
+    else:
+        status = "UNCERTAIN"
+
+    conf = assessment.get("confidence")
+    try:
+        conf = max(0.0, min(1.0, float(conf))) if conf is not None else None
+    except Exception:
+        conf = None
+
+    reveal_t = assessment.get("intended_reveal_timing_in_seconds")
+    if reveal_t is None:
+        reveal_t = assessment.get("estimated_reveal_time_sec")
+
+    first_t = assessment.get("first_answer_visible_time_sec")
+    if first_t is None:
+        first_t = assessment.get("first_visible_time_sec")
+
+    details = (
+        assessment.get("details")
+        or assessment.get("reason")
+        or assessment.get("explanation")
+        or ""
+    )
+
+    return {
+        "status": status,
+        "confidence": conf,
+        "answer_visible_before_reveal": status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"},
+        "first_answer_visible_time_sec": first_t if first_t is not None else -1,
+        "estimated_reveal_time_sec": reveal_t if reveal_t is not None else -1,
+        "persistent": status == "PERSISTENT_EARLY_REVEAL",
+        "reason": str(details),
+        "provider_shape": "reveal_assessment",
+    }
 
 def semantic_story_qa(path, payload, duration):
     """Semantic story QA using KIE Gemini multimodal chat. KIE documents Gemini 2.5 Flash's OpenAI-compatible chat endpoint as accepting media URLs through the image_url content shape, including video URLs. The same KIE API key used by the project is supplied through KIE_API_KEY. """
@@ -340,7 +431,7 @@ def semantic_story_qa(path, payload, duration):
         headers={
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
-            "User-Agent": "KP-Kids-RAW-QA/4.0",
+            "User-Agent": "KP-Kids-RAW-QA/5.0",
         },
     )
 
@@ -348,7 +439,7 @@ def semantic_story_qa(path, payload, duration):
         with urllib.request.urlopen(req, timeout=180) as resp:
             raw_text = resp.read().decode("utf-8", errors="replace")
             obj = json.loads(raw_text)
-        verdict = _json_from_model_text(_kie_chat_output_text(obj))
+        verdict = _normalize_kie_verdict(_json_from_model_text(_kie_chat_output_text(obj)))
     except urllib.error.HTTPError as e:
         try:
             detail = e.read().decode("utf-8", errors="replace")
@@ -390,20 +481,24 @@ def semantic_story_qa(path, payload, duration):
     }
     if status not in allowed:
         status = "UNCERTAIN"
+    raw_conf = verdict.get("confidence")
     try:
-        conf = max(0.0, min(1.0, float(verdict.get("confidence") or 0.0)))
+        conf = max(0.0, min(1.0, float(raw_conf))) if raw_conf is not None else None
     except Exception:
-        conf = 0.0
+        conf = None
 
-    blocking = status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"} and conf >= 0.72
+    explicit_early = status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"}
+    # If KIE explicitly classifies an early reveal but supplies no numerical
+    # confidence, block it rather than letting it pass because of a fabricated 0.
+    blocking = explicit_early and (conf is None or conf >= 0.72)
 
     return {
         "status": status,
-        "confidence": round(conf, 3),
+        "confidence": round(conf, 3) if conf is not None else None,
         "blocking": blocking,
         "answer_visible_before_reveal": bool(verdict.get("answer_visible_before_reveal", False)),
-        "first_answer_visible_time": float(verdict.get("first_answer_visible_time_sec", -1) or -1),
-        "estimated_reveal_time": float(verdict.get("estimated_reveal_time_sec", -1) or -1),
+        "first_answer_visible_time": float(verdict.get("first_answer_visible_time_sec", -1) if verdict.get("first_answer_visible_time_sec") not in (None, "") else -1),
+        "estimated_reveal_time": float(verdict.get("estimated_reveal_time_sec", -1) if verdict.get("estimated_reveal_time_sec") not in (None, "") else -1),
         "persistent": bool(verdict.get("persistent", status == "PERSISTENT_EARLY_REVEAL")),
         "reason": str(verdict.get("reason") or "")[:700],
         "provider": "kie.ai",
@@ -468,7 +563,9 @@ def analyze(path, payload):
 
     semantic = semantic_story_qa(path, payload, duration)
     if semantic.get("blocking"):
-        issues.append({"code":semantic.get("status","SEMANTIC_STORY_QA_FAIL"),"detail":f"{semantic.get('reason','')} (confidence={semantic.get('confidence',0):.2f})"})
+        sem_conf = semantic.get("confidence")
+        conf_suffix = f" (confidence={sem_conf:.2f})" if isinstance(sem_conf, (int, float)) else ""
+        issues.append({"code":semantic.get("status","SEMANTIC_STORY_QA_FAIL"),"detail":f"{semantic.get('reason','')}{conf_suffix}"})
     elif semantic.get("status") in {"UNCERTAIN","SKIPPED"}:
         warnings.append({"code":"SEMANTIC_STORY_"+semantic.get("status","UNCERTAIN"),"detail":semantic.get("reason","")})
 
