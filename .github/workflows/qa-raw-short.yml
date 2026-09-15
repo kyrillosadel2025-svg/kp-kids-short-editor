@@ -1,4 +1,4 @@
-name: KP Kids RAW Video QA - KIE Vision
+name: KP Kids RAW Video QA - KIE Vision V4
 
 on:
   workflow_dispatch:
