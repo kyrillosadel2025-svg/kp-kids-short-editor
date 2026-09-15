@@ -43,16 +43,16 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
-SHORT_PLAYBACK_SPEED = 0.95  # target overall body pace; individual sections vary intelligently
-SPEECH_BASE_SPEED = 0.99
-SHORT_PAUSE_SPEED = 0.96
-MEDIUM_PAUSE_SPEED = 0.93
-LONG_PAUSE_SPEED = 0.90
+SHORT_PLAYBACK_SPEED = 1.00  # V9: natural speech baseline; dead air is shortened selectively
+SPEECH_BASE_SPEED = 1.00
+SHORT_PAUSE_SPEED = 1.10
+MEDIUM_PAUSE_SPEED = 1.24
+LONG_PAUSE_SPEED = 1.42
 MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V8.4 Reach Mode + Glow Typography + Audible Music"
+EDITOR_VERSION = "V9.0 Retention Engine + Perceptual Music Mix"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -109,15 +109,7 @@ def looks_like_mp4(path):
         return False
 
 def download_google_drive_file(file_id, dest, label="Google Drive video"):
-    """
-    Robust public Google Drive downloader using only the Python standard library.
-
-    Improvements in V5.5:
-    - retries transient Google 429/5xx errors
-    - tries several Drive download endpoints
-    - handles Drive HTML confirmation/interstitial forms
-    - validates that the downloaded file is really an MP4 before FFmpeg sees it
-    """
+    """ Robust public Google Drive downloader using only the Python standard library. Improvements in V5.5: - retries transient Google 429/5xx errors - tries several Drive download endpoints - handles Drive HTML confirmation/interstitial forms - validates that the downloaded file is really an MP4 before FFmpeg sees it """
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     opener.addheaders = [
@@ -530,14 +522,7 @@ def shape_symbol_from_payload(payload):
 
 
 def build_motion_graphics_plan(payload, edit_plan, theme):
-    """
-    Contextual scene overlays are intentionally disabled.
-
-    Earlier builds drew scan lines, brackets, arrows, badges and color sweeps
-    over the generated scene. Without object tracking these cues could land in
-    visually wrong places and made the edit feel synthetic. V7.4 keeps motion
-    design on the typography itself only.
-    """
+    """ Contextual scene overlays are intentionally disabled. Earlier builds drew scan lines, brackets, arrows, badges and color sweeps over the generated scene. Without object tracking these cues could land in visually wrong places and made the edit feel synthetic. V7.4 keeps motion design on the typography itself only. """
     return {
         "type": "none",
         "sfx": "none",
@@ -547,11 +532,7 @@ def build_motion_graphics_plan(payload, edit_plan, theme):
     }
 
 def build_motion_typography_plan(payload, edit_plan):
-    """
-    Child-friendly kinetic typography inspired by the supplied reference:
-    the card arrives first, text follows with a brief trail/overshoot, a soft
-    sheen completes the reveal, then everything holds still long enough to read.
-    """
+    """ Child-friendly kinetic typography inspired by the supplied reference: the card arrives first, text follows with a brief trail/overshoot, a soft sheen completes the reveal, then everything holds still long enough to read. """
     style = edit_plan.get("style") or "CLEAN_DISCOVERY"
     h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style, "kids-kinetic-v77")
 
@@ -775,13 +756,7 @@ def _pause_speed(length):
 
 
 def build_pacing_plan(duration, silence_intervals):
-    """
-    Build deterministic A/V pacing segments.
-
-    Speech stays very close to natural speed, while real pauses breathe a little more.
-    Speeds are globally normalized so total duration stays close to the previous 0.95x
-    body target instead of growing unpredictably.
-    """
+    """ Build deterministic A/V pacing segments. Speech stays very close to natural speed, while real pauses breathe a little more. Speeds are globally normalized so total duration stays close to the previous 0.95x body target instead of growing unpredictably. """
     if duration <= 0:
         return {"segments": [], "output_duration": 0.0, "target_duration": 0.0}
 
@@ -803,12 +778,10 @@ def build_pacing_plan(duration, silence_intervals):
     if not raw:
         raw = [{"source_start": 0.0, "source_end": duration, "kind": "speech", "speed": SHORT_PLAYBACK_SPEED}]
 
-    target_duration = duration / SHORT_PLAYBACK_SPEED
-    current = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
-    factor = current / target_duration if target_duration > 0 else 1.0
-    for x in raw:
-        # Preserve the relationship (speech faster, pauses slower) while targeting the same overall duration.
-        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
+    # V9 retention pacing: do not globally normalize back to a slowed 0.95x body.
+    # Speech stays natural; only genuine pauses are compressed. This makes the edit
+    # feel faster without making the voice sound rushed or synthetic.
+    target_duration = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
 
     # Recompute output timeline after clamping.
     out_t = 0.0
@@ -1740,76 +1713,65 @@ def choose_engaging_segment(track_path, needed_duration, payload, profile):
 
 
 def _library_music_gains(profile, payload):
-    """V8.3: keep the music clearly audible even while dialogue is present."""
+    """V9 perceptual mix: music remains audible on phone speakers without masking speech."""
     level = str(payload.get("music_level") or "present").strip().lower()
-
     if profile["name"] == "playful_dance":
-        normal, duck = 0.86, 0.48
+        normal, duck = 1.00, 0.72
     elif profile["name"] == "calm_warm":
-        normal, duck = 0.70, 0.39
+        normal, duck = 0.86, 0.64
     elif profile["name"] == "curious_space":
-        normal, duck = 0.77, 0.42
+        normal, duck = 0.93, 0.68
     else:
-        normal, duck = 0.79, 0.43
-
+        normal, duck = 0.95, 0.69
     if level in {"soft", "low", "gentle"}:
-        normal *= 0.86
-        duck *= 0.88
+        normal *= 0.90; duck *= 0.92
     elif level in {"strong", "high", "loud"}:
-        normal *= 1.06
-        duck *= 1.06
-
-    duck = max(duck, normal * 0.50)
-    return min(normal, 1.05), min(duck, 0.58)
+        normal *= 1.07; duck *= 1.05
+    duck = max(duck, normal * 0.66)
+    return min(normal, 1.10), min(duck, 0.82)
 
 
-def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment):
-    """Mix one selected real-music highlight while keeping dialogue clearly dominant."""
+def _music_volume_expr(speech_windows, normal_gain, duck_gain, timing=None):
+    """Single-stage ducking plus a short reveal lift; avoids the old double-duck."""
+    expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
+    if timing and timing.get("reveal") is not None:
+        r = float(timing["reveal"])
+        st, en = max(0.0, r - 0.12), r + 0.58
+        lift = min(1.14, normal_gain * 1.10)
+        expr = f"if(between(t,{st:.3f},{en:.3f}),{lift:.4f},{expr})"
+    return expr
+
+
+def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment, timing=None):
+    """Mix a real music highlight with one deliberate ducking stage and perceptual headroom."""
     normal_gain, duck_gain = _library_music_gains(profile, payload)
-    volume_expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
-    fade_out = max(0.0, float(duration) - 0.55)
+    volume_expr = _music_volume_expr(speech_windows, normal_gain, duck_gain, timing)
+    fade_out = max(0.0, float(duration) - 0.42)
     seg_start = max(0.0, float(segment.get("start") or 0.0))
     seg_dur = max(1.0, float(duration))
-
     fc = (
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
-        "asplit=2[main][speechsc];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
         f"[1:a]atrim=start={seg_start:.3f}:duration={seg_dur:.3f},asetpts=PTS-STARTPTS,"
         "aformat=sample_rates=48000:channel_layouts=stereo,"
-        "highpass=f=75,lowpass=f=12000,"
-        "loudnorm=I=-20:TP=-2.5:LRA=9,"
+        "highpass=f=75,lowpass=f=12500,"
+        "loudnorm=I=-17.5:TP=-2.2:LRA=8,"
         f"volume='{volume_expr}':eval=frame,"
-        "afade=t=in:st=0:d=0.28,"
-        f"afade=t=out:st={fade_out:.3f}:d=0.55[musicbase];"
-        # Dynamic protection catches speech even if silence detection/timeline is imperfect.
-        "[musicbase][speechsc]sidechaincompress="
-        "threshold=0.080:ratio=1.8:attack=18:release=300:makeup=1:mix=0.30[duckedmusic];"
-        "[main][duckedmusic]amix=inputs=2:normalize=0:duration=first,"
-        "alimiter=limit=0.94[aout]"
+        "afade=t=in:st=0:d=0.10,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.42[music];"
+        "[main][music]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.93[aout]"
     )
-    cmd = [
-        "ffmpeg", "-y", "-i", str(video_in), "-i", str(track_path),
-        "-filter_complex", fc,
-        "-map", "0:v:0", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
-    ]
+    cmd = ["ffmpeg","-y","-i",str(video_in),"-i",str(track_path),"-filter_complex",fc,
+           "-map","0:v:0","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","192k",
+           "-ar","48000","-ac","2","-t",f"{float(duration):.3f}","-movflags","+faststart",str(output)]
     run(cmd)
-    return {
-        "source": "user_mp3_library",
-        "profile": profile["name"],
-        "track": track_path.name,
-        "segment_start": round(seg_start, 3),
-        "segment_duration": round(seg_dur, 3),
-        "track_duration": round(float(segment.get("track_duration") or 0.0), 3),
-        "highlight_score": segment.get("score", 0.0),
-        "highlight_method": segment.get("method", "unknown"),
-        "normal_gain": normal_gain,
-        "speech_duck_gain": duck_gain,
-        "dynamic_sidechain": True,
-        "music_level": str(payload.get("music_level") or "present"),
-        "music_loudnorm_target_lufs": -20,
-    }
+    return {"source":"user_mp3_library","profile":profile["name"],"track":track_path.name,
+            "segment_start":round(seg_start,3),"segment_duration":round(seg_dur,3),
+            "track_duration":round(float(segment.get("track_duration") or 0.0),3),
+            "highlight_score":segment.get("score",0.0),"highlight_method":segment.get("method","unknown"),
+            "normal_gain":normal_gain,"speech_duck_gain":duck_gain,"dynamic_sidechain":False,
+            "ducking_mode":"single_stage_timeline","reveal_music_lift":bool(timing),
+            "music_level":str(payload.get("music_level") or "present"),"music_loudnorm_target_lufs":-17.5}
 
 def generate_original_music_bed(dest, duration, payload):
     """Generate deterministic, original, child-friendly instrumental WAV."""
@@ -1926,7 +1888,8 @@ def _music_duck_expr(speech_windows, normal_gain, duck_gain):
 
 def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows, payload, profile=None):
     profile = profile or _music_profile(payload)
-    volume_expr = _music_duck_expr(speech_windows, profile["gain"], profile["duck_gain"])
+    normal_gain, duck_gain = _library_music_gains(profile, payload)
+    volume_expr = _music_volume_expr(speech_windows, normal_gain, duck_gain, payload.get("_editor_timing"))
     fade_out = max(0.0, float(duration) - 0.45)
     fc = (
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
@@ -1950,12 +1913,7 @@ def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows
     return profile
 
 def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP_SECONDS):
-    """Normalize intro/closure to output format and retime to a concise 3s+ branding clip.
-
-    Existing clips longer than target are trimmed cleanly. Clips shorter than the minimum
-    are padded by holding the final frame and padding audio, so branding never drops
-    below the requested minimum duration. Intro/closure speed itself is never changed.
-    """
+    """Normalize intro/closure to output format and retime to a concise 3s+ branding clip. Existing clips longer than target are trimmed cleanly. Clips shorter than the minimum are padded by holding the final frame and padding audio, so branding never drops below the requested minimum duration. Intro/closure speed itself is never changed. """
     info = ffprobe_video_info(src)
     src_dur = max(float(info.get("duration") or 0.0), 0.01)
     if target_duration is None:
@@ -2124,6 +2082,46 @@ def edit_video(src, out, payload):
         },
     }
 
+
+def measure_audio_loudness(path):
+    """Measure final perceptual loudness/peak with FFmpeg ebur128 for QC telemetry."""
+    cmd = ["ffmpeg","-hide_banner","-nostats","-i",str(path),"-filter_complex","ebur128=peak=true","-f","null","-"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    summaries = re.findall(r"Summary:\s*(.*?)(?=\n\s*Summary:|$)", text, re.S)
+    block = summaries[-1] if summaries else text[-5000:]
+    def grab(pat):
+        m = re.search(pat, block)
+        return float(m.group(1)) if m else None
+    return {"integrated_lufs":grab(r"I:\s*([-+0-9.]+)\s*LUFS"),
+            "loudness_range_lu":grab(r"LRA:\s*([-+0-9.]+)\s*LU"),
+            "true_peak_dbfs":grab(r"Peak:\s*([-+0-9.]+)\s*dBFS")}
+
+
+def build_qc_report(result, music_result, final_path):
+    loud = measure_audio_loudness(final_path)
+    speech = result.get("output_speech_intervals") or []
+    sil = result.get("output_silence_intervals") or []
+    duration = max(float(result.get("body_duration") or 0.0), 0.001)
+    speech_s = sum(max(0.0,b-a) for a,b in speech)
+    silence_s = sum(max(0.0,b-a) for a,b in sil)
+    events = [result.get("timing_plan",{}).get("reveal"), result.get("timing_plan",{}).get("interaction")]
+    events = sorted(x for x in events if isinstance(x,(int,float)))
+    points = [0.0] + events + [duration]
+    longest_static = max((b-a for a,b in zip(points,points[1:])), default=duration)
+    src_dur = float((result.get("source_info") or {}).get("duration") or duration)
+    removed = max(0.0, min(15.0,src_dur) - duration)
+    flags=[]
+    if loud.get("integrated_lufs") is not None and loud["integrated_lufs"] < -18.0: flags.append("output_too_quiet")
+    if loud.get("true_peak_dbfs") is not None and loud["true_peak_dbfs"] > -0.5: flags.append("peak_too_hot")
+    if music_result.get("source") != "disabled" and float(music_result.get("speech_duck_gain") or 1) < 0.55: flags.append("music_over_ducked")
+    if longest_static > 4.5: flags.append("long_static_span_review")
+    return {"final_audio":loud,"speech_seconds":round(speech_s,3),"silence_seconds":round(silence_s,3),
+            "music_ducking_percent":round(max(0.0,1-float(music_result.get("speech_duck_gain") or 1))*100,1),
+            "estimated_dead_air_removed_seconds":round(removed,3),"longest_between_emphasis_events_seconds":round(longest_static,3),
+            "hook_timing_seconds":0.0,"reveal_timing_seconds":result.get("timing_plan",{}).get("reveal"),
+            "editorial_emphasis_events":len(events),"flags":flags}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload-b64", required=True)
@@ -2146,7 +2144,7 @@ def main():
             return False
         return bool(default)
 
-    include_intro = payload_bool("include_intro", True)
+    include_intro = payload_bool("include_intro", False)
     include_closure = payload_bool("include_closure", True)
     edit_variant = str(payload.get("edit_variant") or (
         "both" if include_intro and include_closure else
@@ -2188,7 +2186,7 @@ def main():
                             segment = choose_engaging_segment(track, result["body_duration"], payload, music_profile)
                             music_result = mix_library_music_bed(
                                 edited_body, track, edited_body_music, result["body_duration"],
-                                result.get("output_speech_intervals") or [], payload, music_profile, segment
+                                result.get("output_speech_intervals") or [], payload, music_profile, segment, result.get("timing_plan")
                             )
                             music_result["library_dir"] = str(library_dir)
                             used_library = True
@@ -2196,6 +2194,7 @@ def main():
                             print(f"Real music library mix failed; using procedural fallback: {e}", flush=True)
             if not used_library:
                 music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
+                payload["_editor_timing"] = result.get("timing_plan")
                 mix_original_music_bed(
                     edited_body, music_bed_wav, edited_body_music,
                     result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
@@ -2280,6 +2279,10 @@ def main():
         meta["final_output_info"] = ffprobe_video_info(Path(args.output))
     except Exception as e:
         meta["final_output_info"] = {"probe_error": str(e)}
+    try:
+        meta["quality_control"] = build_qc_report(result, music_result or {}, Path(args.output))
+    except Exception as e:
+        meta["quality_control"] = {"qc_error": str(e), "flags": ["qc_measurement_failed"]}
     Path("edit_result.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
