@@ -1,0 +1,134 @@
+name: KP Kids Build Long Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_b64:
+        description: Base64 encoded long-video payload
+        required: true
+        type: string
+      callback_url:
+        description: n8n resume callback URL
+        required: true
+        type: string
+      callback_token:
+        description: callback authentication token
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Build landscape long video
+        id: render
+        env:
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          python3 long_editor.py \
+            --payload-b64 "$PAYLOAD_B64" \
+            --output kp_kids_long_video.mp4 \
+            --meta-out long_result_meta.json
+
+      - name: Upload long-video artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-kids-long-video
+          path: |
+            kp_kids_long_video.mp4
+            long_result_meta.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Callback n8n - success
+        if: success()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+          payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
+          try:
+              meta = json.load(open('long_result_meta.json', encoding='utf-8'))
+          except Exception:
+              meta = {}
+          body = {
+              **payload,
+              'status': 'success',
+              'github_run_id': os.environ['GH_RUN_ID'],
+              'github_repository': os.environ['GH_REPOSITORY'],
+              'artifact_name': 'kp-kids-long-video',
+              'editor_result': meta,
+              'message': 'KP Kids long video rendered successfully',
+          }
+          req = urllib.request.Request(
+              os.environ['CALLBACK_URL'],
+              data=json.dumps(body).encode('utf-8'),
+              headers={
+                  'Content-Type': 'application/json',
+                  'x-kp-kids-callback': os.environ['CALLBACK_TOKEN'],
+                  'User-Agent': 'KP-Kids-Long-Editor/1.0',
+              },
+              method='POST',
+          )
+          with urllib.request.urlopen(req, timeout=60) as r:
+              print(r.status, r.read()[:500])
+          PY
+
+      - name: Callback n8n - failure
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+          try:
+              payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
+          except Exception:
+              payload = {}
+          body = {
+              **payload,
+              'status': 'failed',
+              'github_run_id': os.environ['GH_RUN_ID'],
+              'github_repository': os.environ['GH_REPOSITORY'],
+              'artifact_name': 'kp-kids-long-video',
+              'message': 'KP Kids long-video GitHub render failed',
+          }
+          req = urllib.request.Request(
+              os.environ['CALLBACK_URL'],
+              data=json.dumps(body).encode('utf-8'),
+              headers={
+                  'Content-Type': 'application/json',
+                  'x-kp-kids-callback': os.environ['CALLBACK_TOKEN'],
+                  'User-Agent': 'KP-Kids-Long-Editor/1.0',
+              },
+              method='POST',
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  print(r.status, r.read()[:500])
+          except Exception as e:
+              print('Failure callback also failed:', e)
+          PY
