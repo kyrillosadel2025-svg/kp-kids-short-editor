@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V8.3: Glow Typography + Smart Real Music + Always-Audible Speech Ducking
+# KP Kids Short Editor V8.4: Reach Mode + Glow Typography + Always-Audible Smart Music
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -52,7 +52,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V8.3 Glow Typography + Audible Music + Gentle Speech Ducking"
+EDITOR_VERSION = "V8.4 Reach Mode + Glow Typography + Audible Music"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -979,6 +979,11 @@ def build_edit_plan(payload, duration):
         opening = "topic" if topic and h % 3 != 0 else "none"
     else:
         opening = "topic" if topic and h % 2 == 0 else "category"
+
+    # Reach Mode leaves the first 2–3 seconds completely to the visual/audio hook.
+    # Keep the later reveal keyword, but suppress editorial opening/topic cards.
+    if payload.get("reach_mode", True):
+        opening = "none"
 
     show_keyword = bool(keyword) and style in {"CLEAN_DISCOVERY", "PLAYFUL_QUIZ", "COUNT_AND_PLAY"}
     if style == "CLEAN_DISCOVERY" and h % 4 == 0:
