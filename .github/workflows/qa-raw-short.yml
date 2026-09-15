@@ -41,6 +41,8 @@ jobs:
         continue-on-error: true
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VISION_QA_MODEL: ${{ vars.VISION_QA_MODEL || 'gpt-5.6-luna' }}
         run: |
           set -o pipefail
           python3 raw_video_qc.py \
