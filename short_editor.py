@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V8.0: Interactive Edit + Guaranteed Original Music Bed
+# KP Kids Short Editor V8.1: Interactive Edit + Smart Real Music Library + Speech Ducking
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -18,6 +18,9 @@
 # - avoids decorative particle fields, confetti, random squares, and persistent HUD clutter.
 
 import argparse
+import os
+import sys
+import array
 import base64
 import hashlib
 import http.cookiejar
@@ -49,7 +52,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V8.0 Guaranteed Original Music + Interactive Intro/Closure"
+EDITOR_VERSION = "V8.1 Smart Real Music Library + Auto Highlight Segment + Speech Ducking"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1530,6 +1533,278 @@ def _music_profile(payload):
     return {"name":"learning_plucks", "tempo":106, "root":261.63, "gain":0.105, "duck_gain":0.026, "swing":0.015, "percussion":0.42}
 
 
+
+# User-provided real music library. The editor prefers these tracks when present,
+# automatically finds a strong short section, then falls back to the original
+# procedural synth if the library is missing or unreadable.
+MUSIC_TRACK_GROUPS = {
+    "playful_dance": [
+        "Bunny Hop - Quincas Moreira.mp3",
+        "Little Samba - Quincas Moreira.mp3",
+        "Shake It - Aakash Gandhi.mp3",
+        "Hot Drop Bus - Rod Kim.mp3",
+        "Kazoom - Quincas Moreira.mp3",
+        "The Emperor's New Nikes - DJ Williams.mp3",
+    ],
+    "calm_warm": [
+        "Bedtime - Reed Mathis.mp3",
+        "Take it Slow - SefChol.mp3",
+        "A Truly Dazzling Dream - National Sweetheart.mp3",
+        "Little Fish - Quincas Moreira.mp3",
+    ],
+    "curious_space": [
+        "Event Horizon - The Grey Room _ Density & Time.mp3",
+        "Frame-Dragging - The Grey Room _ Density & Time.mp3",
+        "Rapid Unscheduled Disassembly - The Grey Room _ Density & Time.mp3",
+    ],
+    "sunny_plucks": [
+        "Sunny Day - Reed Mathis.mp3",
+        "My Dog Is Happy - Reed Mathis.mp3",
+        "Good Days - Yung Logos.mp3",
+        "Friday Fugue - Trevor Garrod.mp3",
+        "Little Fish - Quincas Moreira.mp3",
+    ],
+    "learning_plucks": [
+        "Ballerina - Quincas Moreira.mp3",
+        "Good Days - Yung Logos.mp3",
+        "Friday Fugue - Trevor Garrod.mp3",
+        "Sunny Day - Reed Mathis.mp3",
+        "Snake on the Beach - Nico Staf.mp3",
+        "The Emperor's New Nikes - DJ Williams.mp3",
+    ],
+}
+
+
+def find_music_library(payload):
+    """Find a repo/local music folder containing MP3 files."""
+    script_dir = Path(__file__).resolve().parent
+    candidates = []
+    if payload.get("music_library_dir"):
+        candidates.append(Path(str(payload.get("music_library_dir"))).expanduser())
+    if os.environ.get("KP_KIDS_MUSIC_DIR"):
+        candidates.append(Path(os.environ["KP_KIDS_MUSIC_DIR"]).expanduser())
+    candidates += [
+        script_dir / "music",
+        script_dir / "MP3",
+        Path.cwd() / "music",
+        Path.cwd() / "MP3",
+    ]
+    seen = set()
+    for d in candidates:
+        try:
+            d = d.resolve()
+        except Exception:
+            pass
+        key = str(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        if d.is_dir() and any(d.glob("*.mp3")):
+            return d
+    return None
+
+
+def _music_seed(payload, extra=""):
+    seed_text = "|".join(str(payload.get(k, "")) for k in [
+        "short_id", "lesson_key", "topic", "category", "content_mode", "music_style"
+    ]) + "|" + str(extra)
+    return int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def choose_library_track(library_dir, payload, profile):
+    """Choose a deterministic-but-varied track suitable for the episode profile."""
+    available = {p.name.lower(): p for p in library_dir.glob("*.mp3") if p.is_file()}
+    preferred = MUSIC_TRACK_GROUPS.get(profile["name"], MUSIC_TRACK_GROUPS["learning_plucks"])
+    pool = [available[n.lower()] for n in preferred if n.lower() in available]
+    if not pool:
+        pool = sorted(available.values(), key=lambda p: p.name.lower())
+    if not pool:
+        return None
+    rng = random.Random(_music_seed(payload, profile["name"]))
+    return pool[rng.randrange(len(pool))]
+
+
+def _audio_duration(path):
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path)
+        ], text=True).strip()
+        return max(0.0, float(out))
+    except Exception:
+        return 0.0
+
+
+def _decode_energy_seconds(track_path, sample_rate=4000):
+    """Decode very-low-rate mono PCM and return one RMS/activity feature per second."""
+    p = subprocess.run([
+        "ffmpeg", "-v", "error", "-i", str(track_path), "-vn", "-ac", "1",
+        "-ar", str(sample_rate), "-f", "s16le", "pipe:1"
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    pcm = array.array("h")
+    pcm.frombytes(p.stdout)
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    if not pcm:
+        return []
+    feats = []
+    step = sample_rate
+    for start in range(0, len(pcm), step):
+        chunk = pcm[start:start+step]
+        if not chunk:
+            continue
+        # RMS = perceived energy proxy; activity rewards sections with rhythmic movement.
+        sq = 0.0
+        diff = 0.0
+        prev = float(chunk[0])
+        peak = 0.0
+        for x in chunk:
+            fx = float(x)
+            sq += fx * fx
+            ax = abs(fx)
+            if ax > peak:
+                peak = ax
+            diff += abs(fx - prev)
+            prev = fx
+        n = max(1, len(chunk))
+        rms = math.sqrt(sq / n) / 32768.0
+        activity = (diff / n) / 32768.0
+        feats.append((rms, activity, peak / 32768.0))
+    return feats
+
+
+def choose_engaging_segment(track_path, needed_duration, payload, profile):
+    """Pick a short, energetic section instead of always using the beginning of a long track."""
+    track_duration = _audio_duration(track_path)
+    needed = max(1.0, float(needed_duration))
+    if track_duration <= needed + 1.0:
+        return {
+            "start": 0.0, "duration": min(needed, max(track_duration, needed)),
+            "track_duration": track_duration, "score": 0.0, "method": "whole-track"
+        }
+
+    # Keep away from intros/outros when the track is long enough.
+    head_margin = 7.0 if track_duration > needed + 24 else 1.0
+    tail_margin = 8.0 if track_duration > needed + 24 else 1.0
+    latest = max(head_margin, track_duration - needed - tail_margin)
+
+    try:
+        feats = _decode_energy_seconds(track_path)
+        if not feats:
+            raise RuntimeError("no audio features")
+        window = max(2, int(math.ceil(needed)))
+        start_min = max(0, int(math.floor(head_margin)))
+        start_max = min(len(feats) - window, int(math.floor(latest)))
+        if start_max < start_min:
+            start_min, start_max = 0, max(0, len(feats) - window)
+
+        max_rms = max((f[0] for f in feats), default=1e-6) or 1e-6
+        max_act = max((f[1] for f in feats), default=1e-6) or 1e-6
+        candidates = []
+        for st in range(start_min, start_max + 1):
+            chunk = feats[st:st+window]
+            rms_vals = [x[0] / max_rms for x in chunk]
+            act_vals = [x[1] / max_act for x in chunk]
+            mean_rms = sum(rms_vals) / len(rms_vals)
+            mean_act = sum(act_vals) / len(act_vals)
+            variance = sum((x - mean_rms) ** 2 for x in rms_vals) / len(rms_vals)
+            dynamic = math.sqrt(max(0.0, variance))
+            early = sum(rms_vals[:min(3, len(rms_vals))]) / min(3, len(rms_vals))
+            silence_penalty = sum(1 for x in rms_vals if x < 0.10) / len(rms_vals)
+
+            if profile["name"] == "calm_warm":
+                score = 0.58 * mean_rms + 0.18 * mean_act + 0.14 * early + 0.10 * (1.0 - min(1.0, dynamic))
+            elif profile["name"] == "playful_dance":
+                score = 0.48 * mean_rms + 0.32 * mean_act + 0.12 * dynamic + 0.08 * early
+            else:
+                score = 0.52 * mean_rms + 0.26 * mean_act + 0.12 * dynamic + 0.10 * early
+            score -= 0.45 * silence_penalty
+            candidates.append((score, float(st)))
+
+        if candidates:
+            candidates.sort(reverse=True)
+            # Pick among the three strongest windows so successive shorts do not all use
+            # one identical hook while still staying inside the track's strongest area.
+            top = candidates[:min(3, len(candidates))]
+            rng = random.Random(_music_seed(payload, track_path.name + "|segment"))
+            score, start = top[rng.randrange(len(top))]
+            return {
+                "start": min(start, latest), "duration": needed,
+                "track_duration": track_duration, "score": round(float(score), 5),
+                "method": "energy-activity-highlight"
+            }
+    except Exception as e:
+        print(f"Music highlight analysis failed for {track_path.name}: {e}", flush=True)
+
+    # Robust deterministic fallback: still avoid the long intro/outro.
+    span = max(0.0, latest - head_margin)
+    rng = random.Random(_music_seed(payload, track_path.name + "|fallback"))
+    start = head_margin + (rng.random() * span if span > 0 else 0.0)
+    return {
+        "start": round(start, 3), "duration": needed, "track_duration": track_duration,
+        "score": 0.0, "method": "safe-random-middle"
+    }
+
+
+def _library_music_gains(profile, payload):
+    # These values are applied AFTER loudness normalization of the music track.
+    # Speech is protected twice: explicit known speech windows + dynamic sidechain ducking.
+    if profile["name"] == "playful_dance":
+        return 0.60, 0.17
+    if profile["name"] == "calm_warm":
+        return 0.44, 0.13
+    if profile["name"] == "curious_space":
+        return 0.50, 0.15
+    return 0.52, 0.15
+
+
+def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment):
+    """Mix one selected real-music highlight while keeping dialogue clearly dominant."""
+    normal_gain, duck_gain = _library_music_gains(profile, payload)
+    volume_expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
+    fade_out = max(0.0, float(duration) - 0.55)
+    seg_start = max(0.0, float(segment.get("start") or 0.0))
+    seg_dur = max(1.0, float(duration))
+
+    fc = (
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
+        "asplit=2[main][speechsc];"
+        f"[1:a]atrim=start={seg_start:.3f}:duration={seg_dur:.3f},asetpts=PTS-STARTPTS,"
+        "aformat=sample_rates=48000:channel_layouts=stereo,"
+        "highpass=f=75,lowpass=f=12000,"
+        "loudnorm=I=-23:TP=-3.0:LRA=10,"
+        f"volume='{volume_expr}':eval=frame,"
+        "afade=t=in:st=0:d=0.28,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.55[musicbase];"
+        # Dynamic protection catches speech even if silence detection/timeline is imperfect.
+        "[musicbase][speechsc]sidechaincompress="
+        "threshold=0.020:ratio=10:attack=8:release=260:makeup=1[duckedmusic];"
+        "[main][duckedmusic]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.94[aout]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_in), "-i", str(track_path),
+        "-filter_complex", fc,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
+    ]
+    run(cmd)
+    return {
+        "source": "user_mp3_library",
+        "profile": profile["name"],
+        "track": track_path.name,
+        "segment_start": round(seg_start, 3),
+        "segment_duration": round(seg_dur, 3),
+        "track_duration": round(float(segment.get("track_duration") or 0.0), 3),
+        "highlight_score": segment.get("score", 0.0),
+        "highlight_method": segment.get("method", "unknown"),
+        "normal_gain": normal_gain,
+        "speech_duck_gain": duck_gain,
+        "dynamic_sidechain": True,
+        "music_loudnorm_target_lufs": -23,
+    }
+
 def generate_original_music_bed(dest, duration, payload):
     """Generate deterministic, original, child-friendly instrumental WAV."""
     profile = _music_profile(payload)
@@ -1889,17 +2164,43 @@ def main():
         download(source_url, src)
         result = edit_video(src, edited_body, payload)
 
-        # Guaranteed original music bed: generated locally, then ducked under detected speech.
-        # This removes dependence on the video model deciding whether to create music.
+        # Smart real-music library first; procedural original synth remains a zero-failure fallback.
         music_bed_enabled = payload_bool("music_bed_enabled", True)
+        music_library_enabled = payload_bool("music_library_enabled", True)
         body_for_branding = edited_body
         music_profile = None
+        music_result = {"source": "disabled"}
         if music_bed_enabled:
-            music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
-            mix_original_music_bed(
-                edited_body, music_bed_wav, edited_body_music,
-                result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
-            )
+            music_profile = _music_profile(payload)
+            used_library = False
+            if music_library_enabled:
+                library_dir = find_music_library(payload)
+                if library_dir is not None:
+                    track = choose_library_track(library_dir, payload, music_profile)
+                    if track is not None:
+                        try:
+                            segment = choose_engaging_segment(track, result["body_duration"], payload, music_profile)
+                            music_result = mix_library_music_bed(
+                                edited_body, track, edited_body_music, result["body_duration"],
+                                result.get("output_speech_intervals") or [], payload, music_profile, segment
+                            )
+                            music_result["library_dir"] = str(library_dir)
+                            used_library = True
+                        except Exception as e:
+                            print(f"Real music library mix failed; using procedural fallback: {e}", flush=True)
+            if not used_library:
+                music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
+                mix_original_music_bed(
+                    edited_body, music_bed_wav, edited_body_music,
+                    result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
+                )
+                music_result = {
+                    "source": "procedural_original_synth",
+                    "profile": music_profile.get("name", "learning_plucks"),
+                    "dynamic_sidechain": False,
+                    "speech_duck_gain": music_profile.get("duck_gain"),
+                    "normal_gain": music_profile.get("gain"),
+                }
             body_for_branding = edited_body_music
 
         # Brand clips are now controlled by the Telegram review choice.
@@ -1962,7 +2263,9 @@ def main():
     meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
     meta["closure_append_enabled"] = include_closure
     meta["music_bed_enabled"] = bool(payload.get("music_bed_enabled", True))
-    meta["music_bed_source"] = "procedural_original_synth" if meta["music_bed_enabled"] else "disabled"
+    meta["music_library_enabled"] = bool(payload.get("music_library_enabled", True))
+    meta["music_bed_source"] = (music_result or {}).get("source", "disabled") if meta["music_bed_enabled"] else "disabled"
+    meta["music_result"] = music_result if meta["music_bed_enabled"] else {"source": "disabled"}
     try:
         meta["music_profile"] = music_profile if music_profile is not None else _music_profile(payload)
     except Exception:
