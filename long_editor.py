@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.2
+"""KP Kids Long Video Editor V1.3
 
 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts.
 - Prefers archived Google Drive RAWs, falls back to original video URLs.
@@ -31,9 +31,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.2 - Strict Landscape Branding + Explicit Brand Choice"
-INTRO_DRIVE_FILE_ID = "1K0krAhogRv5ybCw7oXdf_ZwpZ1B2_Ywv"
-CLOSURE_DRIVE_FILE_ID = "10LWO-ibXbDaC8ElFtCfPJ674_nVBrB3l"
+EDITOR_VERSION = "KP Kids Long Editor V1.3 - Side Glow Motion + Strict Landscape Branding"
+INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
 OUTPUT_FPS = 30
@@ -45,6 +45,16 @@ AUDIO_BITRATE = "128k"
 FOREGROUND_H = 1010
 SEGMENT_FADE = 0.18
 MUSIC_GAIN = 0.72
+
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
+
+LEFT_X = 105
+RIGHT_X = 1325
+SIDE_W = 500
+SIDE_TITLE_Y = 260
+SIDE_KEYWORD_Y = 700
+SIDE_CATEGORY_Y = 170
 
 MUSIC_PROFILES = {
     "playful_dance": [
@@ -237,6 +247,213 @@ def sanitize_text(s):
     return str(s or "").replace("\n", " ").strip()
 
 
+
+CATEGORY_LABELS = {
+    "alphabet":"ALPHABET", "letters":"LETTER MATCH", "phonics":"PHONICS",
+    "numbers":"NUMBERS", "counting":"COUNTING", "shapes":"SHAPES",
+    "colors":"COLORS", "science":"SCIENCE", "space":"SPACE",
+    "nature":"NATURE", "body":"HEALTHY BODY", "safety":"SAFE & SMART",
+    "emotions":"FEELINGS", "manners":"KINDNESS", "community":"HELPERS",
+    "transport":"LET'S GO", "weather":"WEATHER", "animals":"ANIMALS",
+    "food":"FOOD", "math":"MATH", "opposites":"OPPOSITES",
+    "world":"WORLD", "positions":"POSITION WORDS", "sorting":"SORTING",
+    "patterns":"PATTERNS", "sizes":"SIZES", "directions":"DIRECTIONS",
+    "calendar":"CALENDAR", "seasons":"SEASONS", "time":"ROUTINES",
+    "entertainment":"PLAY & MOVE",
+}
+
+CATEGORY_ACCENTS = {
+    "alphabet":"0xFFD54A", "letters":"0xFFD54A", "phonics":"0xFFB347",
+    "numbers":"0xFFA630", "counting":"0xF5B041", "shapes":"0x5DADE2",
+    "colors":"0x7DFF7A", "science":"0x76D7C4", "space":"0xF4D03F",
+    "nature":"0x7DCEA0", "body":"0xF8C471", "safety":"0xF7DC6F",
+    "emotions":"0xF8C471", "manners":"0xF9E79F", "community":"0xAED6F1",
+    "transport":"0xF5B041", "weather":"0xF7DC6F", "animals":"0xF4D03F",
+    "food":"0x82E0AA", "math":"0xF8C471", "opposites":"0xFFEAA7",
+    "world":"0x58D68D", "positions":"0xF7DC6F", "sorting":"0xF8C471",
+    "patterns":"0xAED6F1", "sizes":"0xF9E79F", "directions":"0xF8C471",
+    "calendar":"0xF9E79F", "seasons":"0x5DADE2", "time":"0xF8C471",
+    "entertainment":"0xFFD54A",
+}
+
+def category_label(category):
+    return CATEGORY_LABELS.get(str(category or "").strip().lower(), "KP KIDS")
+
+
+def category_accent(category):
+    return CATEGORY_ACCENTS.get(str(category or "").strip().lower(), "0xFFD54A")
+
+
+def clean_display_title(value):
+    t = sanitize_text(value)
+    t = re.sub(r"#Shorts\b", "", t, flags=re.I)
+    t = re.sub(r"\|\s*KP\s*Kids.*$", "", t, flags=re.I)
+    t = re.sub(r"\s+with\s+(Kevin|Patrick|Lumi|Bibo).*$", "", t, flags=re.I)
+    t = re.sub(r"^(Learn Something New|Kids Discovery|Quick Quiz|Can You Solve It)\s*:\s*", "", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip()[:90]
+
+
+def derive_side_keyword(clip):
+    explicit = sanitize_text(
+        clip.get("keyword") or clip.get("topic") or clip.get("subject") or ""
+    )
+    if explicit:
+        return clean_display_title(explicit)[:34]
+
+    title = clean_display_title(clip.get("title") or "")
+    # Prefer the first useful phrase before a separator/question suffix.
+    title = re.split(r"\s*[|—–]\s*", title)[0].strip()
+    title = re.sub(r"^(What|Why|How|Which|Can)\s+", "", title, flags=re.I)
+    title = re.sub(r"\?$", "", title).strip()
+    return title[:34] or "KP KIDS"
+
+
+def wrap_side_text(text, max_chars=18, max_lines=3):
+    words = str(text or "").split()
+    if not words:
+        return ""
+    lines, cur = [], ""
+    for word in words:
+        test = word if not cur else cur + " " + word
+        if len(test) <= max_chars or not cur:
+            cur = test
+        else:
+            lines.append(cur)
+            cur = word
+            if len(lines) >= max_lines - 1:
+                break
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    consumed = " ".join(lines)
+    original = " ".join(words)
+    if len(consumed) < len(original) and lines:
+        lines[-1] = lines[-1].rstrip(" .") + "…"
+    return "\n".join(lines[:max_lines])
+
+
+def write_text_file(path, text):
+    Path(path).write_text(str(text or ""), encoding="utf-8")
+    return str(Path(path).resolve())
+
+
+def drawtext_file_filter(textfile, fontfile, color, fontsize, x, y, alpha, borderw=0, bordercolor=None, line_spacing=8):
+    parts = [
+        f"drawtext=fontfile={fontfile}",
+        f"textfile={textfile}",
+        f"fontcolor={color}",
+        f"fontsize={fontsize}",
+        f"x='{x}'",
+        f"y='{y}'",
+        f"alpha='{alpha}'",
+        f"line_spacing={line_spacing}",
+    ]
+    if borderw:
+        parts.append(f"borderw={borderw}")
+        parts.append(f"bordercolor={bordercolor or color}")
+    return ":".join(parts)
+
+
+def fade_alpha_expr(start, end, fade=0.28):
+    start = float(start)
+    end = float(end)
+    fade = max(0.08, min(float(fade), max(0.08, (end - start) / 3)))
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+fade:.3f}),(t-{start:.3f})/{fade:.3f},"
+        f"if(lt(t,{end-fade:.3f}),1,"
+        f"if(lt(t,{end:.3f}),({end:.3f}-t)/{fade:.3f},0))))"
+    )
+
+
+def build_side_graphics_filters(clip, duration, clip_index, clip_total, work_dir):
+    """Return drawtext filters placed only in the side gutters."""
+    category = str(clip.get("category") or "").strip().lower()
+    accent = category_accent(category)
+    label = category_label(category)
+    series = sanitize_text(clip.get("series_name") or "")
+    title = clean_display_title(clip.get("title") or clip.get("topic") or "")
+    keyword = derive_side_keyword(clip)
+
+    if series:
+        left_label = f"{label}\n{series[:34]}"
+    else:
+        left_label = label
+
+    left_text = write_text_file(Path(work_dir) / f"side_left_{clip_index:02d}.txt", left_label)
+    title_text = write_text_file(
+        Path(work_dir) / f"side_title_{clip_index:02d}.txt",
+        wrap_side_text(title, max_chars=18, max_lines=3)
+    )
+    keyword_text = write_text_file(
+        Path(work_dir) / f"side_keyword_{clip_index:02d}.txt",
+        wrap_side_text(keyword.upper(), max_chars=16, max_lines=2)
+    )
+    count_text = write_text_file(
+        Path(work_dir) / f"side_count_{clip_index:02d}.txt",
+        f"{clip_index} / {clip_total}"
+    )
+
+    title_end = min(max(2.2, duration - 0.35), 4.3)
+    kw_start = min(max(3.8, duration * 0.38), max(0.6, duration - 2.5))
+    kw_end = min(duration - 0.28, kw_start + 2.8)
+    if kw_end <= kw_start + 0.5:
+        kw_start = max(0.6, duration * 0.45)
+        kw_end = max(kw_start + 0.5, duration - 0.25)
+
+    cat_alpha = fade_alpha_expr(0.15, max(0.7, duration - 0.2), 0.30)
+    title_alpha = fade_alpha_expr(0.22, title_end, 0.32)
+    kw_alpha = fade_alpha_expr(kw_start, kw_end, 0.28)
+
+    # Slight entrance travel, then settle. Text remains in the side gutter.
+    title_x = f"if(lt(t,0.70),{RIGHT_X}+70*(0.70-t)/0.48,{RIGHT_X})"
+    kw_x = f"if(lt(t,{kw_start+0.48:.3f}),{RIGHT_X}+50*({kw_start+0.48:.3f}-t)/0.48,{RIGHT_X})"
+
+    filters = []
+
+    # LEFT: persistent series/category identity and clip number.
+    filters.append(drawtext_file_filter(
+        left_text, FONT, f"{accent}@0.16", 34, LEFT_X, SIDE_CATEGORY_Y,
+        cat_alpha, borderw=10, bordercolor=f"{accent}@0.13", line_spacing=10
+    ))
+    filters.append(drawtext_file_filter(
+        left_text, FONT, "white@0.92", 34, LEFT_X, SIDE_CATEGORY_Y,
+        cat_alpha, borderw=2, bordercolor=f"{accent}@0.92", line_spacing=10
+    ))
+    filters.append(drawtext_file_filter(
+        count_text, FONT, "white@0.68", 25, LEFT_X, 285,
+        cat_alpha, borderw=1, bordercolor="black@0.20", line_spacing=4
+    ))
+
+    # RIGHT: title enters first with the same clean glow language as Shorts.
+    filters.append(drawtext_file_filter(
+        title_text, FONT_ITALIC, f"{accent}@0.18", 46, title_x, SIDE_TITLE_Y,
+        title_alpha, borderw=12, bordercolor=f"{accent}@0.15", line_spacing=10
+    ))
+    filters.append(drawtext_file_filter(
+        title_text, FONT_ITALIC, "white@0.98", 46, title_x, SIDE_TITLE_Y,
+        title_alpha, borderw=2, bordercolor=f"{accent}@0.98", line_spacing=10
+    ))
+
+    # RIGHT LOWER: later keyword/reveal echo, also glow-only.
+    filters.append(drawtext_file_filter(
+        keyword_text, FONT_ITALIC, f"{accent}@0.20", 54, kw_x, SIDE_KEYWORD_Y,
+        kw_alpha, borderw=15, bordercolor=f"{accent}@0.15", line_spacing=9
+    ))
+    filters.append(drawtext_file_filter(
+        keyword_text, FONT_ITALIC, "white@0.98", 54, kw_x, SIDE_KEYWORD_Y,
+        kw_alpha, borderw=2, bordercolor=f"{accent}@0.98", line_spacing=9
+    ))
+
+    return filters, {
+        "category_label": label,
+        "accent": accent,
+        "title": title,
+        "keyword": keyword,
+        "clip_index": clip_index,
+        "clip_total": clip_total,
+    }
+
+
 def normalize_brand_clip(src, dest):
     """Normalize landscape intro/closure to the same delivery format."""
     dur = max(0.5, ffprobe_duration(src))
@@ -263,28 +480,49 @@ def normalize_brand_clip(src, dest):
     run(cmd)
 
 
-def normalize_vertical_clip(src, dest, title=""):
-    """Turn a vertical RAW short into an attractive 16:9 scene."""
+def normalize_vertical_clip(src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True):
+    """Turn a vertical RAW short into a 16:9 scene with optional side-gutter motion graphics."""
+    clip = clip or {}
     dur = max(0.5, ffprobe_duration(src))
     audio = has_audio(src)
     fade_out = max(0.0, dur - SEGMENT_FADE)
-    # Background: enlarged + heavily blurred + slightly darkened.
-    # Foreground: full vertical frame centered and nearly full height.
-    fg = (
+
+    base_graph = (
         f"[0:v]split=2[bg][fg];"
         f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
         f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=32,eq=brightness=-0.11:saturation=0.82[bg2];"
         f"[fg]scale=-2:{FOREGROUND_H}:force_original_aspect_ratio=decrease,"
         f"setsar=1[fg2];"
-        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,"
-        f"fade=t=in:st=0:d={SEGMENT_FADE:.2f},"
-        f"fade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
-        f"fps={OUTPUT_FPS},format=yuv420p[v]"
+        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base]"
     )
+
+    graphic_meta = {}
+    if side_graphics_enabled:
+        filters, graphic_meta = build_side_graphics_filters(
+            clip, dur, clip_index, clip_total, Path(dest).parent
+        )
+        chain = "[base]"
+        for i, flt in enumerate(filters):
+            out_label = f"g{i}"
+            base_graph += f";{chain}{flt}[{out_label}]"
+            chain = f"[{out_label}]"
+        base_graph += (
+            f";{chain}fade=t=in:st=0:d={SEGMENT_FADE:.2f},"
+            f"fade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
+            f"fps={OUTPUT_FPS},format=yuv420p[v]"
+        )
+    else:
+        base_graph += (
+            f";[base]fade=t=in:st=0:d={SEGMENT_FADE:.2f},"
+            f"fade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
+            f"fps={OUTPUT_FPS},format=yuv420p[v]"
+        )
+
     cmd = ["ffmpeg", "-y", "-i", str(src)]
     if not audio:
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
-    cmd += ["-filter_complex", fg, "-map", "[v]"]
+    cmd += ["-filter_complex", base_graph, "-map", "[v]"]
+
     if audio:
         cmd += [
             "-map", "0:a:0", "-af",
@@ -294,6 +532,7 @@ def normalize_vertical_clip(src, dest, title=""):
         ]
     else:
         cmd += ["-map", "1:a:0"]
+
     cmd += [
         "-r", str(OUTPUT_FPS), "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
@@ -301,7 +540,7 @@ def normalize_vertical_clip(src, dest, title=""):
         "-movflags", "+faststart", "-shortest", str(dest)
     ]
     run(cmd)
-    return dur
+    return dur, graphic_meta
 
 
 def concat_files(files, dest):
@@ -452,13 +691,18 @@ def main():
 
         norm = work / f"clip_{idx:02d}_landscape.mp4"
         try:
-            dur = normalize_vertical_clip(raw, norm, clip.get("title", ""))
+            side_graphics_enabled = payload_bool(payload, "side_graphics_enabled", True)
+            dur, graphic_meta = normalize_vertical_clip(
+                raw, norm, clip=clip, clip_index=idx, clip_total=len(clips),
+                side_graphics_enabled=side_graphics_enabled
+            )
             normalized.append(norm)
             used.append({
                 "short_id": str(clip.get("short_id") or ""),
                 "title": sanitize_text(clip.get("title")),
                 "category": str(clip.get("category") or ""),
                 "duration": round(dur, 3),
+                "side_graphics": graphic_meta,
             })
         except Exception as e:
             print(f"Clip {idx}: normalize failed: {e}", flush=True)
@@ -546,6 +790,8 @@ def main():
         "clip_short_ids": [u["short_id"] for u in used if u["short_id"]],
         "clips_failed": failed,
         "music_result": music_result,
+        "side_graphics_enabled": payload_bool(payload, "side_graphics_enabled", True),
+        "side_graphics_style": "shorts-inspired glow side gutters",
         "branding": brand_meta,
         "intro_drive_file_id": intro_drive_file_id if include_intro else "",
         "closure_drive_file_id": closure_drive_file_id if include_closure else "",
