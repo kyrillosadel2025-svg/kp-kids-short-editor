@@ -1,0 +1,97 @@
+name: KP Kids RAW Video QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload_b64:
+        description: Base64 JSON payload
+        required: true
+        type: string
+      callback_url:
+        description: n8n Wait resume URL
+        required: true
+        type: string
+      callback_token:
+        description: callback auth token
+        required: true
+        type: string
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg and OpenCV
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          pip install opencv-python-headless numpy
+
+      - name: Analyze RAW video
+        id: qa
+        continue-on-error: true
+        env:
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          set -o pipefail
+          python3 raw_video_qc.py \
+            --payload-b64 "$PAYLOAD_B64" \
+            --output raw_qa_result.json \
+            2>&1 | tee raw_qa.log
+
+      - name: Callback n8n
+        if: always()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          try:
+              result = json.load(open("raw_qa_result.json", encoding="utf-8"))
+          except Exception:
+              detail = ""
+              try:
+                  lines = open("raw_qa.log", encoding="utf-8", errors="replace").read().splitlines()
+                  detail = "\n".join(lines[-25:])[-1800:]
+              except Exception:
+                  pass
+              result = {
+                  "qa_pass": False,
+                  "qa_status": "error",
+                  "issues": [{"code":"QA_RUNTIME_ERROR","detail":detail or "RAW QA did not produce a result"}],
+                  "warnings": [],
+                  "metrics": {}
+              }
+          body = {
+              **payload,
+              **result,
+              "github_run_id": os.environ["GH_RUN_ID"],
+              "github_repository": os.environ["GH_REPOSITORY"],
+          }
+          data = json.dumps(body).encode("utf-8")
+          req = urllib.request.Request(
+              os.environ["CALLBACK_URL"],
+              data=data,
+              method="POST",
+              headers={
+                  "Content-Type":"application/json",
+                  "x-kp-kids-callback":os.environ["CALLBACK_TOKEN"],
+              },
+          )
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              print(resp.status, resp.read().decode("utf-8", errors="replace"))
+          PY
