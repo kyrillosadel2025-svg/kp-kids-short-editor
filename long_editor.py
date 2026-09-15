@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.0
+"""KP Kids Long Video Editor V1.1
 
 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts.
 - Prefers archived Google Drive RAWs, falls back to original video URLs.
@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.0 - Landscape Compilation + Smart Music"
+EDITOR_VERSION = "KP Kids Long Editor V1.1 - Same-Category Compilation + Audible Smart Music"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
@@ -44,7 +44,7 @@ AUDIO_RATE = 48000
 AUDIO_BITRATE = "128k"
 FOREGROUND_H = 1010
 SEGMENT_FADE = 0.18
-MUSIC_GAIN = 0.18
+MUSIC_GAIN = 0.72
 
 MUSIC_PROFILES = {
     "playful_dance": [
@@ -331,9 +331,10 @@ def mix_music(body_video, dest, profile, seed_text=""):
     # reduces the bed while source speech is present, but lets it breathe between lines.
     fc = (
         f"[0:a]aresample=48000,volume=1.0[speech];"
-        f"[1:a]aresample=48000,volume={MUSIC_GAIN:.3f},"
+        f"[1:a]aresample=48000,highpass=f=70,lowpass=f=12500,"
+        f"loudnorm=I=-20:TP=-2.5:LRA=9,volume={MUSIC_GAIN:.3f},"
         f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.3f}:d=1.2[music];"
-        f"[music][speech]sidechaincompress=threshold=0.025:ratio=3.0:attack=18:release=520:makeup=1[ducked];"
+        f"[music][speech]sidechaincompress=threshold=0.080:ratio=1.8:attack=22:release=360:makeup=1:mix=0.30[ducked];"
         f"[speech][ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
         f"alimiter=limit=0.95[aout]"
     )
