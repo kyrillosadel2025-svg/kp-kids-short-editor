@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V8.4: Reach Mode + Glow Typography + Always-Audible Smart Music
+# KP Kids Short Editor V12: Visual Story Analyzer + Spoiler Guard + Safe Reveal Reordering
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -43,16 +43,16 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
-SHORT_PLAYBACK_SPEED = 1.00  # V9: natural speech baseline; dead air is shortened selectively
-SPEECH_BASE_SPEED = 1.00
-SHORT_PAUSE_SPEED = 1.10
-MEDIUM_PAUSE_SPEED = 1.24
-LONG_PAUSE_SPEED = 1.42
+SHORT_PLAYBACK_SPEED = 0.95  # target overall body pace; individual sections vary intelligently
+SPEECH_BASE_SPEED = 0.99
+SHORT_PAUSE_SPEED = 0.96
+MEDIUM_PAUSE_SPEED = 0.93
+LONG_PAUSE_SPEED = 0.90
 MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V9.0 Retention Engine + Perceptual Music Mix"
+EDITOR_VERSION = "V12 Visual Story Analyzer + Spoiler Guard"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -84,6 +84,124 @@ MOTION_GRAPHICS_DURATION = 0.90
 MOTION_GRAPHICS_ENTRANCE = 0.22
 MOTION_GRAPHICS_MAX_ALPHA = 0.55
 
+
+
+
+# ---- Video generation model selector / cost preview -------------------------
+# USD estimates shown BEFORE the generation API call. Veo values are official
+# Gemini API per-second prices as of 2026-09-15. Other providers are deliberately
+# configurable because account/provider credit conversion can differ.
+VIDEO_MODEL_CATALOG = {
+    "veo-3.1": {
+        "label": "Veo 3.1",
+        "provider": "Google Gemini API",
+        "model_id": "veo-3.1-generate-preview",
+        "usd_per_second": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
+        "credit_mode": "usd",
+    },
+    "veo-3.1-fast": {
+        "label": "Veo 3.1 Fast",
+        "provider": "Google Gemini API",
+        "model_id": "veo-3.1-fast-generate-preview",
+        "usd_per_second": {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
+        "credit_mode": "usd",
+    },
+    "veo-3.1-lite": {
+        "label": "Veo 3.1 Lite",
+        "provider": "Google Gemini API",
+        "model_id": "veo-3.1-lite-generate-preview",
+        "usd_per_second": {"720p": 0.05, "1080p": 0.08},
+        "credit_mode": "usd",
+    },
+    "seedance": {
+        "label": "Seedance",
+        "provider": "configured API provider",
+        "model_id": "seedance",
+        "usd_per_second": {},
+        "credit_mode": "provider",
+        "env_credit_rate": "SEEDANCE_CREDITS_PER_SECOND",
+    },
+    "kling": {
+        "label": "Kling",
+        "provider": "configured API provider",
+        "model_id": "kling",
+        "usd_per_second": {},
+        "credit_mode": "provider",
+        "env_credit_rate": "KLING_CREDITS_PER_SECOND",
+    },
+}
+
+def estimate_generation_cost(model_key, duration=8.0, resolution="720p"):
+    model = VIDEO_MODEL_CATALOG.get(str(model_key or "").lower())
+    if not model:
+        return {"known": False, "message": f"Unknown video model: {model_key}"}
+    duration = max(0.0, float(duration or 0.0))
+    resolution = str(resolution or "720p").lower()
+    rate = model.get("usd_per_second", {}).get(resolution)
+    if rate is not None:
+        total = rate * duration
+        return {
+            "known": True, "label": model["label"], "provider": model["provider"],
+            "duration": duration, "resolution": resolution,
+            "usd_per_second": rate, "estimated_usd": round(total, 4),
+            "message": f'{model["label"]}: estimated API charge ${total:.2f} '
+                       f'({duration:g}s, {resolution}, ${rate:.2f}/s).'
+        }
+
+    env_name = model.get("env_credit_rate")
+    raw = os.environ.get(env_name, "") if env_name else ""
+    try:
+        credits_per_second = float(raw)
+    except (TypeError, ValueError):
+        credits_per_second = None
+    if credits_per_second is not None:
+        credits = credits_per_second * duration
+        return {
+            "known": True, "label": model["label"], "provider": model["provider"],
+            "duration": duration, "resolution": resolution,
+            "credits_per_second": credits_per_second,
+            "estimated_credits": round(credits, 3),
+            "message": f'{model["label"]}: estimated {credits:.2f} provider credits '
+                       f'({duration:g}s at {credits_per_second:g} credits/s).'
+        }
+    return {
+        "known": False, "label": model["label"], "provider": model["provider"],
+        "duration": duration, "resolution": resolution,
+        "message": f'{model["label"]}: exact credit cost is not configured. '
+                   f'Set {env_name}=<credits_per_second> for your API/provider account.'
+    }
+
+def choose_video_model_interactive(duration=8.0, resolution="720p"):
+    """CLI selector that previews cost and requires confirmation before spending."""
+    keys = list(VIDEO_MODEL_CATALOG)
+    while True:
+        print("\nVideo generation model:", flush=True)
+        for i, key in enumerate(keys, 1):
+            print(f" {i}. {VIDEO_MODEL_CATALOG[key]['label']}", flush=True)
+        raw = input("Choose model number: ").strip()
+        try:
+            key = keys[int(raw)-1]
+        except (ValueError, IndexError):
+            print("Invalid choice.", flush=True)
+            continue
+        estimate = estimate_generation_cost(key, duration, resolution)
+        print("\nCOST PREVIEW:", estimate["message"], flush=True)
+        answer = input("Continue with this model? [y/N]: ").strip().lower()
+        if answer in {"y", "yes"}:
+            return key, estimate
+        print("No API call made. Choose another model.", flush=True)
+
+def resolve_video_model(payload):
+    """Resolve model + cost preview for upstream generation workflows."""
+    key = str(payload.get("video_model") or os.environ.get("KP_VIDEO_MODEL") or "").lower()
+    duration = float(payload.get("generation_duration") or 8.0)
+    resolution = str(payload.get("generation_resolution") or "720p").lower()
+    if not key:
+        key, estimate = choose_video_model_interactive(duration, resolution)
+    else:
+        estimate = estimate_generation_cost(key, duration, resolution)
+        print("COST PREVIEW:", estimate["message"], flush=True)
+    return key, estimate
 
 
 def run(cmd):
@@ -778,10 +896,12 @@ def build_pacing_plan(duration, silence_intervals):
     if not raw:
         raw = [{"source_start": 0.0, "source_end": duration, "kind": "speech", "speed": SHORT_PLAYBACK_SPEED}]
 
-    # V9 retention pacing: do not globally normalize back to a slowed 0.95x body.
-    # Speech stays natural; only genuine pauses are compressed. This makes the edit
-    # feel faster without making the voice sound rushed or synthetic.
-    target_duration = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
+    target_duration = duration / SHORT_PLAYBACK_SPEED
+    current = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
+    factor = current / target_duration if target_duration > 0 else 1.0
+    for x in raw:
+        # Preserve the relationship (speech faster, pauses slower) while targeting the same overall duration.
+        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
 
     # Recompute output timeline after clamping.
     out_t = 0.0
@@ -838,6 +958,223 @@ def choose_event_from_silence(silence_intervals, duration, window_start, window_
             score = abs(mid-target) - min(en-st, 1.2) * 0.35
             candidates.append((score, en + 0.05))
     return min(candidates)[1] if candidates else None
+
+
+
+STORY_REORDER_MIN_CONFIDENCE = 0.78
+STORY_REVEAL_MIN_CLIP = 0.45
+STORY_REVEAL_MAX_CLIP = 2.60
+STORY_EARLY_MARGIN = 0.30
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def analyze_story_order(payload, source_duration, silence_intervals):
+    """V11: conservatively detect a trustworthy reveal that occurs before the question."""
+    timeline = payload.get("dialogue_timeline") or ""
+    reveal = _safe_float(payload.get("reveal_time"))
+    question = _safe_float(payload.get("question_time"))
+    interaction = _safe_float(payload.get("interaction_time"))
+    reveal_source = "metadata" if reveal is not None else None
+    question_source = "metadata" if question is not None else None
+
+    if reveal is None:
+        reveal = parse_timeline_event(timeline, ["reveal","answer","correct","result","solution"])
+        if reveal is not None:
+            reveal_source = "timeline"
+    if question is None:
+        question = parse_timeline_event(
+            timeline, ["question","which","what","where","who","choose","guess",
+                       "find","pick","your turn","challenge"]
+        )
+        if question is not None:
+            question_source = "timeline"
+    if question is None and interaction is not None:
+        question, question_source = interaction, "interaction_metadata"
+
+    plan = {
+        "enabled": payload.get("story_analyzer", True) is not False,
+        "action": "keep", "confidence": 0.0, "reason": "no_trustworthy_inversion",
+        "reveal_time": reveal, "question_time": question,
+        "reveal_source": reveal_source, "question_source": question_source,
+        "clip_start": None, "clip_end": None,
+    }
+    if not plan["enabled"] or source_duration <= 0:
+        plan["reason"] = "story_analyzer_disabled_or_empty_source"; return plan
+    if reveal is None or question is None:
+        plan["reason"] = "missing_trustworthy_reveal_or_question"; return plan
+    if not (0 <= reveal < source_duration and 0 <= question < source_duration):
+        plan["reason"] = "event_time_out_of_range"; return plan
+    if reveal + STORY_EARLY_MARGIN >= question:
+        plan["reason"] = "story_order_is_already_safe"; return plan
+
+    confidence = 0.58
+    confidence += 0.14 if reveal_source == "metadata" else 0.09
+    confidence += 0.14 if question_source == "metadata" else 0.09
+    if question_source == "interaction_metadata": confidence += 0.07
+    if question - reveal >= 0.80: confidence += 0.07
+    fmt = str(payload.get("episode_format") or "").lower()
+    if any(k in fmt for k in ("quiz","guess","choose","find","mystery","reveal")):
+        confidence += 0.05
+    confidence = min(confidence, 0.99)
+    plan["confidence"] = round(confidence, 3)
+    if confidence < STORY_REORDER_MIN_CONFIDENCE:
+        plan["reason"] = "inversion_detected_but_confidence_below_threshold"; return plan
+
+    prev_end = next_start = None
+    for st, en in silence_intervals:
+        if en <= reveal and reveal - en <= 1.50: prev_end = en
+        if st >= reveal and st - reveal <= 1.80:
+            next_start = st; break
+    a = prev_end if prev_end is not None else max(0.0, reveal - 0.55)
+    b = next_start if next_start is not None else min(source_duration, reveal + 0.95)
+    if b-a > STORY_REVEAL_MAX_CLIP:
+        a, b = max(0.0, reveal-0.55), min(source_duration, reveal-0.55+STORY_REVEAL_MAX_CLIP)
+    if b-a < STORY_REVEAL_MIN_CLIP:
+        a, b = max(0.0, reveal-0.30), min(source_duration, max(0.0,reveal-0.30)+STORY_REVEAL_MIN_CLIP)
+    if a < 0.05 or b > source_duration-0.15:
+        plan["reason"] = "unsafe_reveal_clip_boundary"; return plan
+    if b >= question-0.05:
+        plan["reason"] = "reveal_clip_overlaps_question"; return plan
+    plan.update(action="move_reveal_to_end",
+                reason="high_confidence_reveal_precedes_question",
+                clip_start=round(a,4), clip_end=round(b,4))
+    return plan
+
+
+# ---- V12 Visual Story Analyzer ------------------------------------------------
+# Metadata tells us WHAT event should be a question/reveal; pixels verify WHEN the
+# reveal-looking visual state is already present. This deliberately avoids pretending
+# that raw pixel math understands semantics. It is a conservative spoiler guard.
+VISUAL_SAMPLE_FPS = 4.0
+VISUAL_W = 96
+VISUAL_H = 160
+VISUAL_PERSISTENT_MIN_SIM = 0.86
+VISUAL_PRE_POST_MARGIN = 0.035
+
+def _median(values):
+    vals = sorted(float(x) for x in values)
+    if not vals: return None
+    n=len(vals); m=n//2
+    return vals[m] if n%2 else (vals[m-1]+vals[m])/2.0
+
+def _frame_similarity(a, b):
+    if not a or not b or len(a) != len(b): return 0.0
+    mad = sum(abs(x-y) for x,y in zip(a,b)) / len(a)
+    return max(0.0, min(1.0, 1.0 - mad/255.0))
+
+def sample_gray_frames(path, duration, fps=VISUAL_SAMPLE_FPS):
+    cmd=["ffmpeg","-v","error","-t",f"{duration:.3f}","-i",str(path),
+         "-vf",f"fps={fps},scale={VISUAL_W}:{VISUAL_H}:flags=area,format=gray",
+         "-f","rawvideo","-pix_fmt","gray","-"]
+    proc=subprocess.run(cmd,capture_output=True,check=True)
+    size=VISUAL_W*VISUAL_H; raw=proc.stdout or b""; out=[]
+    for i in range(0,len(raw)-size+1,size):
+        out.append((len(out)/fps, raw[i:i+size]))
+    return out
+
+def _nearest_frame(frames, t):
+    if not frames: return None
+    return min(frames, key=lambda x: abs(x[0]-t))
+
+def analyze_visual_story_order(path, payload, source_duration, metadata_plan):
+    """V12: verify story order from sampled pixels around metadata/timeline events. It can safely detect a common generated-video failure: the final reveal visual state is already visible before the question. If that state persists, editing cannot truly hide the spoiler, so the RAW video is blocked instead of faked. """
+    enabled = payload.get("visual_story_analyzer", True) is not False
+    report={"enabled":enabled,"action":"keep","confidence":0.0,
+            "reason":"visual_story_safe_or_insufficient_evidence","sample_fps":VISUAL_SAMPLE_FPS}
+    if not enabled or source_duration <= 0: return report
+    reveal=_safe_float(metadata_plan.get("reveal_time"))
+    question=_safe_float(metadata_plan.get("question_time"))
+    if reveal is None or question is None:
+        report["reason"]="visual_requires_reveal_and_question_timing"; return report
+    try:
+        frames=sample_gray_frames(path,source_duration)
+    except Exception as e:
+        report["reason"]="visual_sampling_failed"; report["error"]=str(e); return report
+    if len(frames)<8:
+        report["reason"]="too_few_visual_samples"; return report
+    rf=_nearest_frame(frames,reveal)
+    if not rf: return report
+    # Ignore the first 0.35s (generation/fade artifacts). Compare reveal state with
+    # several frames before the question and with frames just after the reveal.
+    pre=[_frame_similarity(f,rf[1]) for t,f in frames if 0.35 <= t <= max(0.35,question-0.25)]
+    post=[_frame_similarity(f,rf[1]) for t,f in frames if reveal <= t <= min(source_duration,reveal+1.5)]
+    pre_med=_median(pre); post_med=_median(post)
+    report.update({"reveal_time":reveal,"question_time":question,
+                   "pre_question_reveal_similarity":None if pre_med is None else round(pre_med,4),
+                   "post_reveal_similarity":None if post_med is None else round(post_med,4),
+                   "samples":len(frames)})
+    if pre_med is None or post_med is None:
+        report["reason"]="insufficient_pre_or_post_samples"; return report
+    # Persistent spoiler: early frames already look essentially like the intended
+    # reveal state. This is not repairable by moving one clip.
+    if pre_med >= VISUAL_PERSISTENT_MIN_SIM and pre_med >= post_med - VISUAL_PRE_POST_MARGIN:
+        confidence=min(0.99,0.72 + max(0.0,pre_med-VISUAL_PERSISTENT_MIN_SIM)*1.8 +
+                       max(0.0,pre_med-(post_med-VISUAL_PRE_POST_MARGIN))*1.2)
+        report.update(action="block_persistent_spoiler",confidence=round(confidence,3),
+                      reason="reveal_visual_state_already_present_before_question")
+        return report
+    # If metadata already found an early isolated reveal, pixels act as confirmation.
+    if metadata_plan.get("action") == "move_reveal_to_end":
+        report.update(action="confirm_move_reveal_to_end",
+                      confidence=max(float(metadata_plan.get("confidence") or 0),0.80),
+                      reason="metadata_inversion_with_nonpersistent_visual_reveal")
+    return report
+
+def remap_time_after_story_reorder(seconds, story_plan, duration):
+    t = _safe_float(seconds)
+    if t is None or story_plan.get("action") != "move_reveal_to_end": return t
+    a, b = float(story_plan["clip_start"]), float(story_plan["clip_end"])
+    moved = b-a
+    if t < a: return t
+    if t >= b: return t-moved
+    return duration-moved+(t-a)
+
+def apply_story_time_metadata(payload, story_plan, duration):
+    if story_plan.get("action") != "move_reveal_to_end": return payload
+    p = dict(payload)
+    for key in ("reveal_time","question_time","interaction_time"):
+        if p.get(key) is not None:
+            p[key] = remap_time_after_story_reorder(p[key], story_plan, duration)
+    if story_plan.get("reveal_time") is not None:
+        p["reveal_time"] = remap_time_after_story_reorder(story_plan["reveal_time"], story_plan, duration)
+    return p
+
+def apply_story_reorder(source_path, dest_path, story_plan):
+    """Move the reveal clip, with its audio, to the end of the generated body."""
+    if story_plan.get("action") != "move_reveal_to_end": return False
+    info = ffprobe_video_info(source_path)
+    d = info["duration"]
+    a, b = float(story_plan["clip_start"]), float(story_plan["clip_end"])
+    if not (0.05 < a < b < d-0.05): return False
+    if info["has_audio"]:
+        fc = (
+            f"[0:v]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
+            f"[0:a]atrim=0:{a:.6f},asetpts=PTS-STARTPTS[a0];"
+            f"[0:v]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
+            f"[0:a]atrim={b:.6f}:{d:.6f},asetpts=PTS-STARTPTS[a1];"
+            f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
+            f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a2];"
+            "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"
+        )
+        cmd = ["ffmpeg","-y","-hide_banner","-i",str(source_path),"-filter_complex",fc,
+               "-map","[v]","-map","[a]","-c:v","libx264","-preset","veryfast","-crf","17",
+               "-c:a","aac","-b:a","192k","-movflags","+faststart",str(dest_path)]
+    else:
+        fc = (
+            f"[0:v]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
+            f"[0:v]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
+            f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
+            "[v0][v1][v2]concat=n=3:v=1:a=0[v]"
+        )
+        cmd = ["ffmpeg","-y","-hide_banner","-i",str(source_path),"-filter_complex",fc,
+               "-map","[v]","-c:v","libx264","-preset","veryfast","-crf","17",
+               "-movflags","+faststart",str(dest_path)]
+    run(cmd)
+    return True
 
 
 def build_timing_plan(payload, source_duration, pacing_plan, silence_intervals):
@@ -1713,65 +2050,76 @@ def choose_engaging_segment(track_path, needed_duration, payload, profile):
 
 
 def _library_music_gains(profile, payload):
-    """V9 perceptual mix: music remains audible on phone speakers without masking speech."""
+    """V8.3: keep the music clearly audible even while dialogue is present."""
     level = str(payload.get("music_level") or "present").strip().lower()
+
     if profile["name"] == "playful_dance":
-        normal, duck = 1.00, 0.72
+        normal, duck = 0.86, 0.48
     elif profile["name"] == "calm_warm":
-        normal, duck = 0.86, 0.64
+        normal, duck = 0.70, 0.39
     elif profile["name"] == "curious_space":
-        normal, duck = 0.93, 0.68
+        normal, duck = 0.77, 0.42
     else:
-        normal, duck = 0.95, 0.69
+        normal, duck = 0.79, 0.43
+
     if level in {"soft", "low", "gentle"}:
-        normal *= 0.90; duck *= 0.92
+        normal *= 0.86
+        duck *= 0.88
     elif level in {"strong", "high", "loud"}:
-        normal *= 1.07; duck *= 1.05
-    duck = max(duck, normal * 0.66)
-    return min(normal, 1.10), min(duck, 0.82)
+        normal *= 1.06
+        duck *= 1.06
+
+    duck = max(duck, normal * 0.50)
+    return min(normal, 1.05), min(duck, 0.58)
 
 
-def _music_volume_expr(speech_windows, normal_gain, duck_gain, timing=None):
-    """Single-stage ducking plus a short reveal lift; avoids the old double-duck."""
-    expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
-    if timing and timing.get("reveal") is not None:
-        r = float(timing["reveal"])
-        st, en = max(0.0, r - 0.12), r + 0.58
-        lift = min(1.14, normal_gain * 1.10)
-        expr = f"if(between(t,{st:.3f},{en:.3f}),{lift:.4f},{expr})"
-    return expr
-
-
-def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment, timing=None):
-    """Mix a real music highlight with one deliberate ducking stage and perceptual headroom."""
+def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment):
+    """Mix one selected real-music highlight while keeping dialogue clearly dominant."""
     normal_gain, duck_gain = _library_music_gains(profile, payload)
-    volume_expr = _music_volume_expr(speech_windows, normal_gain, duck_gain, timing)
-    fade_out = max(0.0, float(duration) - 0.42)
+    volume_expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
+    fade_out = max(0.0, float(duration) - 0.55)
     seg_start = max(0.0, float(segment.get("start") or 0.0))
     seg_dur = max(1.0, float(duration))
+
     fc = (
-        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
+        "asplit=2[main][speechsc];"
         f"[1:a]atrim=start={seg_start:.3f}:duration={seg_dur:.3f},asetpts=PTS-STARTPTS,"
         "aformat=sample_rates=48000:channel_layouts=stereo,"
-        "highpass=f=75,lowpass=f=12500,"
-        "loudnorm=I=-17.5:TP=-2.2:LRA=8,"
+        "highpass=f=75,lowpass=f=12000,"
+        "loudnorm=I=-20:TP=-2.5:LRA=9,"
         f"volume='{volume_expr}':eval=frame,"
-        "afade=t=in:st=0:d=0.10,"
-        f"afade=t=out:st={fade_out:.3f}:d=0.42[music];"
-        "[main][music]amix=inputs=2:normalize=0:duration=first,"
-        "alimiter=limit=0.93[aout]"
+        "afade=t=in:st=0:d=0.28,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.55[musicbase];"
+        # Dynamic protection catches speech even if silence detection/timeline is imperfect.
+        "[musicbase][speechsc]sidechaincompress="
+        "threshold=0.080:ratio=1.8:attack=18:release=300:makeup=1:mix=0.30[duckedmusic];"
+        "[main][duckedmusic]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.94[aout]"
     )
-    cmd = ["ffmpeg","-y","-i",str(video_in),"-i",str(track_path),"-filter_complex",fc,
-           "-map","0:v:0","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","192k",
-           "-ar","48000","-ac","2","-t",f"{float(duration):.3f}","-movflags","+faststart",str(output)]
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_in), "-i", str(track_path),
+        "-filter_complex", fc,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
+    ]
     run(cmd)
-    return {"source":"user_mp3_library","profile":profile["name"],"track":track_path.name,
-            "segment_start":round(seg_start,3),"segment_duration":round(seg_dur,3),
-            "track_duration":round(float(segment.get("track_duration") or 0.0),3),
-            "highlight_score":segment.get("score",0.0),"highlight_method":segment.get("method","unknown"),
-            "normal_gain":normal_gain,"speech_duck_gain":duck_gain,"dynamic_sidechain":False,
-            "ducking_mode":"single_stage_timeline","reveal_music_lift":bool(timing),
-            "music_level":str(payload.get("music_level") or "present"),"music_loudnorm_target_lufs":-17.5}
+    return {
+        "source": "user_mp3_library",
+        "profile": profile["name"],
+        "track": track_path.name,
+        "segment_start": round(seg_start, 3),
+        "segment_duration": round(seg_dur, 3),
+        "track_duration": round(float(segment.get("track_duration") or 0.0), 3),
+        "highlight_score": segment.get("score", 0.0),
+        "highlight_method": segment.get("method", "unknown"),
+        "normal_gain": normal_gain,
+        "speech_duck_gain": duck_gain,
+        "dynamic_sidechain": True,
+        "music_level": str(payload.get("music_level") or "present"),
+        "music_loudnorm_target_lufs": -20,
+    }
 
 def generate_original_music_bed(dest, duration, payload):
     """Generate deterministic, original, child-friendly instrumental WAV."""
@@ -1888,8 +2236,7 @@ def _music_duck_expr(speech_windows, normal_gain, duck_gain):
 
 def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows, payload, profile=None):
     profile = profile or _music_profile(payload)
-    normal_gain, duck_gain = _library_music_gains(profile, payload)
-    volume_expr = _music_volume_expr(speech_windows, normal_gain, duck_gain, payload.get("_editor_timing"))
+    volume_expr = _music_duck_expr(speech_windows, profile["gain"], profile["duck_gain"])
     fade_out = max(0.0, float(duration) - 0.45)
     fc = (
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
@@ -2021,6 +2368,24 @@ def edit_video(src, out, payload):
     source_duration = min(15.0, info["duration"] or 15.0)
 
     silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+
+    # V11 Story Analyzer runs before pacing/graphics so every later edit point sees
+    # the corrected story order. It changes nothing unless confidence is high.
+    story_analysis = analyze_story_order(payload, source_duration, silence_intervals)
+    visual_story_analysis = analyze_visual_story_order(src, payload, source_duration, story_analysis)
+    print("Story Analyzer:", json.dumps(story_analysis, ensure_ascii=False), flush=True)
+    print("Visual Story Analyzer:", json.dumps(visual_story_analysis, ensure_ascii=False), flush=True)
+    if visual_story_analysis.get("action") == "block_persistent_spoiler":
+        raise RuntimeError("V12 VISUAL STORY QA BLOCK: persistent early reveal/spoiler detected before the question; regeneration recommended; no montage can safely hide a persistent spoiler. " + json.dumps(visual_story_analysis, ensure_ascii=False))
+    if story_analysis.get("action") == "move_reveal_to_end":
+        story_fixed = str(Path(out).with_name(Path(out).stem + "_story_fixed.mp4"))
+        if apply_story_reorder(src, story_fixed, story_analysis):
+            payload = apply_story_time_metadata(payload, story_analysis, source_duration)
+            src = story_fixed
+            info = ffprobe_video_info(src)
+            source_duration = min(15.0, info["duration"] or source_duration)
+            silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+
     pacing_plan = build_pacing_plan(source_duration, silence_intervals)
     duration = pacing_plan["output_duration"] or source_duration / SHORT_PLAYBACK_SPEED
 
@@ -2055,6 +2420,8 @@ def edit_video(src, out, payload):
     ]
     run(cmd)
     return {
+        "story_analysis": story_analysis,
+        "visual_story_analysis": visual_story_analysis,
         "editorial_style": edit_plan["style"],
         "edit_plan": edit_plan,
         "timing_plan": timing,
@@ -2082,46 +2449,6 @@ def edit_video(src, out, payload):
         },
     }
 
-
-def measure_audio_loudness(path):
-    """Measure final perceptual loudness/peak with FFmpeg ebur128 for QC telemetry."""
-    cmd = ["ffmpeg","-hide_banner","-nostats","-i",str(path),"-filter_complex","ebur128=peak=true","-f","null","-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
-    summaries = re.findall(r"Summary:\s*(.*?)(?=\n\s*Summary:|$)", text, re.S)
-    block = summaries[-1] if summaries else text[-5000:]
-    def grab(pat):
-        m = re.search(pat, block)
-        return float(m.group(1)) if m else None
-    return {"integrated_lufs":grab(r"I:\s*([-+0-9.]+)\s*LUFS"),
-            "loudness_range_lu":grab(r"LRA:\s*([-+0-9.]+)\s*LU"),
-            "true_peak_dbfs":grab(r"Peak:\s*([-+0-9.]+)\s*dBFS")}
-
-
-def build_qc_report(result, music_result, final_path):
-    loud = measure_audio_loudness(final_path)
-    speech = result.get("output_speech_intervals") or []
-    sil = result.get("output_silence_intervals") or []
-    duration = max(float(result.get("body_duration") or 0.0), 0.001)
-    speech_s = sum(max(0.0,b-a) for a,b in speech)
-    silence_s = sum(max(0.0,b-a) for a,b in sil)
-    events = [result.get("timing_plan",{}).get("reveal"), result.get("timing_plan",{}).get("interaction")]
-    events = sorted(x for x in events if isinstance(x,(int,float)))
-    points = [0.0] + events + [duration]
-    longest_static = max((b-a for a,b in zip(points,points[1:])), default=duration)
-    src_dur = float((result.get("source_info") or {}).get("duration") or duration)
-    removed = max(0.0, min(15.0,src_dur) - duration)
-    flags=[]
-    if loud.get("integrated_lufs") is not None and loud["integrated_lufs"] < -18.0: flags.append("output_too_quiet")
-    if loud.get("true_peak_dbfs") is not None and loud["true_peak_dbfs"] > -0.5: flags.append("peak_too_hot")
-    if music_result.get("source") != "disabled" and float(music_result.get("speech_duck_gain") or 1) < 0.55: flags.append("music_over_ducked")
-    if longest_static > 4.5: flags.append("long_static_span_review")
-    return {"final_audio":loud,"speech_seconds":round(speech_s,3),"silence_seconds":round(silence_s,3),
-            "music_ducking_percent":round(max(0.0,1-float(music_result.get("speech_duck_gain") or 1))*100,1),
-            "estimated_dead_air_removed_seconds":round(removed,3),"longest_between_emphasis_events_seconds":round(longest_static,3),
-            "hook_timing_seconds":0.0,"reveal_timing_seconds":result.get("timing_plan",{}).get("reveal"),
-            "editorial_emphasis_events":len(events),"flags":flags}
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload-b64", required=True)
@@ -2144,7 +2471,7 @@ def main():
             return False
         return bool(default)
 
-    include_intro = payload_bool("include_intro", False)
+    include_intro = payload_bool("include_intro", True)
     include_closure = payload_bool("include_closure", True)
     edit_variant = str(payload.get("edit_variant") or (
         "both" if include_intro and include_closure else
@@ -2186,7 +2513,7 @@ def main():
                             segment = choose_engaging_segment(track, result["body_duration"], payload, music_profile)
                             music_result = mix_library_music_bed(
                                 edited_body, track, edited_body_music, result["body_duration"],
-                                result.get("output_speech_intervals") or [], payload, music_profile, segment, result.get("timing_plan")
+                                result.get("output_speech_intervals") or [], payload, music_profile, segment
                             )
                             music_result["library_dir"] = str(library_dir)
                             used_library = True
@@ -2194,7 +2521,6 @@ def main():
                             print(f"Real music library mix failed; using procedural fallback: {e}", flush=True)
             if not used_library:
                 music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
-                payload["_editor_timing"] = result.get("timing_plan")
                 mix_original_music_bed(
                     edited_body, music_bed_wav, edited_body_music,
                     result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
@@ -2244,6 +2570,8 @@ def main():
     meta["editor_version"] = EDITOR_VERSION
     meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
     meta["pacing_mode"] = "silence_aware_variable_speed"
+    meta["story_analysis"] = result.get("story_analysis", {})
+    meta["visual_story_analysis"] = result.get("visual_story_analysis", {})
     meta["editorial_style"] = result["editorial_style"]
     meta["edit_plan"] = result["edit_plan"]
     meta["timing_plan"] = result["timing_plan"]
@@ -2279,10 +2607,6 @@ def main():
         meta["final_output_info"] = ffprobe_video_info(Path(args.output))
     except Exception as e:
         meta["final_output_info"] = {"probe_error": str(e)}
-    try:
-        meta["quality_control"] = build_qc_report(result, music_result or {}, Path(args.output))
-    except Exception as e:
-        meta["quality_control"] = {"qc_error": str(e), "flags": ["qc_measurement_failed"]}
     Path("edit_result.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
