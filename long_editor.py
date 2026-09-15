@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.1
+"""KP Kids Long Video Editor V1.2
 
 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts.
 - Prefers archived Google Drive RAWs, falls back to original video URLs.
@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.1 - Same-Category Compilation + Audible Smart Music"
+EDITOR_VERSION = "KP Kids Long Editor V1.2 - Strict Landscape Branding + Explicit Brand Choice"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
@@ -101,6 +101,41 @@ def ffprobe_duration(path):
         ]))
     except Exception:
         return 0.0
+
+
+
+def ffprobe_dimensions(path):
+    out = capture([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0", str(path)
+    ])
+    try:
+        w, h = out.split("x", 1)
+        return int(w), int(h)
+    except Exception:
+        raise RuntimeError(f"Could not read video dimensions for {path}")
+
+
+def assert_landscape_brand_clip(path, label):
+    w, h = ffprobe_dimensions(path)
+    ratio = (w / h) if h else 0.0
+    print(f"{label}: source dimensions {w}x{h} ratio={ratio:.3f}", flush=True)
+    if w <= h or ratio < 1.30:
+        raise RuntimeError(
+            f"{label} is NOT landscape ({w}x{h}). "
+            "Refusing to use a Shorts/vertical branding clip in the Long video."
+        )
+    return w, h
+
+
+def payload_bool(payload, key, default=False):
+    v = payload.get(key, default)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def has_audio(path):
@@ -368,6 +403,17 @@ def main():
     clips = payload.get("clips") or payload.get("selected_clips") or []
     raw_proxy_base_url = str(payload.get("raw_proxy_base_url") or "").strip()
     raw_proxy_token = str(payload.get("raw_proxy_token") or "").strip()
+
+    include_intro = payload_bool(payload, "include_intro", False)
+    include_closure = payload_bool(payload, "include_closure", False)
+    intro_drive_file_id = str(payload.get("intro_drive_file_id") or "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf").strip()
+    closure_drive_file_id = str(payload.get("closure_drive_file_id") or "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP").strip()
+
+    print(
+        f"Branding choice: intro={include_intro} closure={include_closure} "
+        f"intro_id={intro_drive_file_id} closure_id={closure_drive_file_id}",
+        flush=True,
+    )
     if not isinstance(clips, list) or not clips:
         raise RuntimeError("Long-video payload contains no clips")
 
@@ -429,25 +475,48 @@ def main():
     music_result = mix_music(body_no_music, body, profile, str(payload.get("long_id") or payload.get("title") or "kp-kids-long"))
 
     final_parts = []
-    if payload.get("include_intro", True):
+    brand_meta = {
+        "include_intro": include_intro,
+        "include_closure": include_closure,
+        "intro_drive_file_id": intro_drive_file_id if include_intro else "",
+        "closure_drive_file_id": closure_drive_file_id if include_closure else "",
+        "intro_source_dimensions": "",
+        "closure_source_dimensions": "",
+    }
+
+    if include_intro:
         intro_raw = work / "intro_raw.mp4"
         intro_norm = work / "intro_norm.mp4"
         if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(raw_proxy_base_url, raw_proxy_token, INTRO_DRIVE_FILE_ID, intro_raw, label="Landscape intro via n8n")
+            download_via_n8n_proxy(
+                raw_proxy_base_url, raw_proxy_token, intro_drive_file_id,
+                intro_raw, label="Dedicated LANDSCAPE intro via n8n"
+            )
         else:
-            download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="Landscape intro")
+            download_google_drive_file(
+                intro_drive_file_id, intro_raw, label="Dedicated LANDSCAPE intro"
+            )
+        iw, ih = assert_landscape_brand_clip(intro_raw, "Long intro")
+        brand_meta["intro_source_dimensions"] = f"{iw}x{ih}"
         normalize_brand_clip(intro_raw, intro_norm)
         final_parts.append(intro_norm)
 
     final_parts.append(body)
 
-    if payload.get("include_closure", True):
+    if include_closure:
         closure_raw = work / "closure_raw.mp4"
         closure_norm = work / "closure_norm.mp4"
         if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(raw_proxy_base_url, raw_proxy_token, CLOSURE_DRIVE_FILE_ID, closure_raw, label="Landscape closure via n8n")
+            download_via_n8n_proxy(
+                raw_proxy_base_url, raw_proxy_token, closure_drive_file_id,
+                closure_raw, label="Dedicated LANDSCAPE closure via n8n"
+            )
         else:
-            download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="Landscape closure")
+            download_google_drive_file(
+                closure_drive_file_id, closure_raw, label="Dedicated LANDSCAPE closure"
+            )
+        cw, ch = assert_landscape_brand_clip(closure_raw, "Long closure")
+        brand_meta["closure_source_dimensions"] = f"{cw}x{ch}"
         normalize_brand_clip(closure_raw, closure_norm)
         final_parts.append(closure_norm)
 
@@ -477,8 +546,9 @@ def main():
         "clip_short_ids": [u["short_id"] for u in used if u["short_id"]],
         "clips_failed": failed,
         "music_result": music_result,
-        "intro_drive_file_id": INTRO_DRIVE_FILE_ID if payload.get("include_intro", True) else "",
-        "closure_drive_file_id": CLOSURE_DRIVE_FILE_ID if payload.get("include_closure", True) else "",
+        "branding": brand_meta,
+        "intro_drive_file_id": intro_drive_file_id if include_intro else "",
+        "closure_drive_file_id": closure_drive_file_id if include_closure else "",
     }
     Path(args.meta_out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
