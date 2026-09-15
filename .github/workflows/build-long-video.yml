@@ -38,10 +38,12 @@ jobs:
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
         run: |
+          set -o pipefail
           python3 long_editor.py \
             --payload-b64 "$PAYLOAD_B64" \
             --output kp_kids_long_video.mp4 \
-            --meta-out long_result_meta.json
+            --meta-out long_result_meta.json \
+            2>&1 | tee long_render.log
 
       - name: Upload long-video artifact
         if: success()
@@ -108,13 +110,34 @@ jobs:
               payload = json.loads(base64.b64decode(os.environ['PAYLOAD_B64']).decode('utf-8'))
           except Exception:
               payload = {}
+          detail = ''
+          try:
+              if os.path.exists('long_render.log'):
+                  lines = open('long_render.log', encoding='utf-8', errors='replace').read().splitlines()
+                  # Prefer the final useful part of the render log while keeping Telegram messages manageable.
+                  tail = lines[-45:]
+                  interesting = [
+                      x for x in tail
+                      if ('RuntimeError:' in x or 'Error:' in x or 'failed:' in x.lower()
+                          or 'NOT landscape' in x or 'Need at least' in x
+                          or 'downloaded file is too small' in x)
+                  ]
+                  chosen = interesting[-8:] if interesting else tail[-18:]
+                  detail = '\n'.join(chosen).strip()[-1800:]
+          except Exception as e:
+              detail = f'Could not read render log: {e}'
+
+          message = 'KP Kids long-video GitHub render failed'
+          if detail:
+              message += '\n\nREAL ERROR FROM RENDER:\n' + detail
+
           body = {
               **payload,
               'status': 'failed',
               'github_run_id': os.environ['GH_RUN_ID'],
               'github_repository': os.environ['GH_REPOSITORY'],
               'artifact_name': 'kp-kids-long-video',
-              'message': 'KP Kids long-video GitHub render failed',
+              'message': message,
           }
           req = urllib.request.Request(
               os.environ['CALLBACK_URL'],
