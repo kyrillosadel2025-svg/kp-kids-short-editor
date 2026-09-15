@@ -1,4 +1,4 @@
-name: KP Kids RAW Video QA
+name: KP Kids RAW Video QA - KIE Vision
 
 on:
   workflow_dispatch:
@@ -41,8 +41,9 @@ jobs:
         continue-on-error: true
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          VISION_QA_MODEL: ${{ vars.VISION_QA_MODEL || 'gpt-5.6-luna' }}
+          KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+          KIE_VISION_ENDPOINT: https://api.kie.ai/gemini-2.5-flash/v1/chat/completions
+          KIE_VISION_MODEL: gemini-2.5-flash
         run: |
           set -o pipefail
           python3 raw_video_qc.py \
