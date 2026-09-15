@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V8.1: Interactive Edit + Smart Real Music Library + Speech Ducking
+# KP Kids Short Editor V8.3: Glow Typography + Smart Real Music + Always-Audible Speech Ducking
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -52,7 +52,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V8.1 Smart Real Music Library + Auto Highlight Segment + Speech Ducking"
+EDITOR_VERSION = "V8.3 Glow Typography + Audible Music + Gentle Speech Ducking"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1264,16 +1264,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         panel_w = kinetic_panel_width(box_w, st, en, start_scale=start_scale)
         panel_x = kinetic_panel_x(center_x, box_w, st, en, start_scale=start_scale)
 
-        # Soft depth shadow stays attached to the card; no lines/streaks on the scene.
-        step(
-            f"drawbox=x='({panel_x})+7':y={base_y+7}:w='{panel_w}':h={box_h}:"
-            f"color=black@0.20:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-        step(
-            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
-            f"color={theme['box']}@0.95:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-
+        # V8.3 CLEAN GLOW: no rectangle/card behind the title.
         text_start = st + 0.08
         base_font = 62 if len(opening_text) <= 18 else 56
         font_expr = kinetic_fontsize_expr(base_font, text_start, dur=0.44, start_scale=0.86, overshoot=1.065)
@@ -1293,27 +1284,29 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
             trail_dir = -1 if motion == "speed_slide_left" else 1
             step(
                 f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize={base_font}:"
-                f"borderw=2:bordercolor=black@0.20:x='(w-text_w)/2+{trail_dir*58}':y={base_y+31}:"
+                f"borderw=2:bordercolor={theme['accent']}@0.28:x='(w-text_w)/2+{trail_dir*58}':y={base_y+31}:"
                 f"alpha='{ghost_alpha(text_start, 0.24, 0.18)}'"
             )
             step(
                 f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize={base_font}:"
-                f"borderw=2:bordercolor=black@0.20:x='(w-text_w)/2+{trail_dir*28}':y={base_y+31}:"
+                f"borderw=2:bordercolor={theme['accent']}@0.28:x='(w-text_w)/2+{trail_dir*28}':y={base_y+31}:"
                 f"alpha='{ghost_alpha(text_start+0.04, 0.24, 0.23)}'"
             )
 
         step(
-            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize='{font_expr}':"
-            f"borderw=3:bordercolor=black@0.34:shadowx=3:shadowy=3:shadowcolor=black@0.32:"
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor={theme['accent']}@0.18:"
+            f"fontsize='{font_expr}':borderw=9:bordercolor={theme['accent']}@0.16:"
             f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
         )
-
-        # Brief card-only light lift on impact. No underline, border flash, or floating graphics.
-        fl_st = st + 0.19
-        fl_en = min(en, fl_st + 0.16)
         step(
-            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:color=white@0.12:t=fill:"
-            f"enable='between(t,{fl_st:.3f},{fl_en:.3f})'"
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor={theme['accent']}@0.15:"
+            f"fontsize='{font_expr}':borderw=15:bordercolor={theme['accent']}@0.12:"
+            f"x='{text_x}':y='{text_y}':alpha='{entrance_only_alpha(text_start,0.52,0.82)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize='{font_expr}':"
+            f"borderw=2:bordercolor={theme['accent']}@0.92:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
         )
 
     # V7.8 STRONG KINETIC KEYWORD / ANSWER:
@@ -1332,15 +1325,7 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         panel_w = kinetic_panel_width(box_w, st, en, start_scale=start_scale)
         panel_x = kinetic_panel_x(center_x, box_w, st, en, start_scale=start_scale)
 
-        step(
-            f"drawbox=x='({panel_x})+8':y={base_y+8}:w='{panel_w}':h={box_h}:"
-            f"color=black@0.22:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-        step(
-            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:"
-            f"color={theme['box']}@0.97:t=fill:enable='between(t,{st:.3f},{en:.3f})'"
-        )
-
+        # V8.3 answer reveal: no panel, just clean glow typography.
         text_start = st + 0.06
         base_font = 82 if len(kw) <= 10 else (74 if len(kw) <= 14 else 66)
         font_expr = kinetic_fontsize_expr(base_font, text_start, dur=0.46, start_scale=0.85, overshoot=1.08)
@@ -1353,26 +1338,28 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
         # Two short after-images create an intentional kinetic impact, disappearing before reading begins.
         step(
             f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize={base_font}:"
-            f"borderw=3:bordercolor=black@0.18:x='(w-text_w)/2+30':y={base_y+38}:"
+            f"borderw=3:bordercolor={theme['accent']}@0.30:x='(w-text_w)/2+30':y={base_y+38}:"
             f"alpha='{ghost_alpha(text_start,0.24,0.18)}'"
         )
         step(
             f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize={base_font}:"
-            f"borderw=3:bordercolor=black@0.18:x='(w-text_w)/2+14':y={base_y+36}:"
+            f"borderw=3:bordercolor={theme['accent']}@0.30:x='(w-text_w)/2+14':y={base_y+36}:"
             f"alpha='{ghost_alpha(text_start+0.035,0.24,0.24)}'"
         )
         step(
-            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize='{font_expr}':"
-            f"borderw=3:bordercolor=black@0.38:shadowx=3:shadowy=3:shadowcolor=black@0.34:"
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor={theme['accent']}@0.20:"
+            f"fontsize='{font_expr}':borderw=11:bordercolor={theme['accent']}@0.18:"
             f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
         )
-
-        # Short internal flash makes the answer land without drawing any lines on the scene.
-        fl_st = st + 0.13
-        fl_en = min(en, fl_st + 0.18)
         step(
-            f"drawbox=x='{panel_x}':y={base_y}:w='{panel_w}':h={box_h}:color=white@0.14:t=fill:"
-            f"enable='between(t,{fl_st:.3f},{fl_en:.3f})'"
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor={theme['accent']}@0.18:"
+            f"fontsize='{font_expr}':borderw=17:bordercolor={theme['accent']}@0.14:"
+            f"x='{text_x}':y='{text_y}':alpha='{entrance_only_alpha(text_start,0.56,0.90)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize='{font_expr}':"
+            f"borderw=2:bordercolor={theme['accent']}@0.98:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
         )
 
     if edit_plan["use_progress"]:
@@ -1522,15 +1509,16 @@ def _music_profile(payload):
     style = str(payload.get("music_style") or "").strip().lower()
     text = f"{mode} {category} {style}"
 
+    # Procedural fallback levels are intentionally audible, but speech stays dominant.
     if mode == "entertainment" or any(k in text for k in ["dance", "bouncy", "clap", "toy-drum", "rhythm"]):
-        return {"name":"playful_dance", "tempo":124, "root":293.66, "gain":0.145, "duck_gain":0.035, "swing":0.035, "percussion":1.0}
+        return {"name":"playful_dance", "tempo":124, "root":293.66, "gain":0.215, "duck_gain":0.135, "swing":0.035, "percussion":1.0}
     if any(k in text for k in ["calm", "sleep", "night", "gentle", "mindful"]):
-        return {"name":"calm_warm", "tempo":88, "root":261.63, "gain":0.090, "duck_gain":0.022, "swing":0.0, "percussion":0.28}
+        return {"name":"calm_warm", "tempo":88, "root":261.63, "gain":0.155, "duck_gain":0.098, "swing":0.0, "percussion":0.28}
     if any(k in text for k in ["mystery", "guess", "space"]):
-        return {"name":"curious_space", "tempo":104, "root":293.66, "gain":0.105, "duck_gain":0.026, "swing":0.018, "percussion":0.50}
+        return {"name":"curious_space", "tempo":104, "root":293.66, "gain":0.175, "duck_gain":0.108, "swing":0.018, "percussion":0.50}
     if any(k in text for k in ["nature", "weather", "ukulele", "acoustic"]):
-        return {"name":"sunny_plucks", "tempo":108, "root":261.63, "gain":0.105, "duck_gain":0.026, "swing":0.018, "percussion":0.44}
-    return {"name":"learning_plucks", "tempo":106, "root":261.63, "gain":0.105, "duck_gain":0.026, "swing":0.015, "percussion":0.42}
+        return {"name":"sunny_plucks", "tempo":108, "root":261.63, "gain":0.182, "duck_gain":0.112, "swing":0.018, "percussion":0.44}
+    return {"name":"learning_plucks", "tempo":106, "root":261.63, "gain":0.182, "duck_gain":0.112, "swing":0.015, "percussion":0.42}
 
 
 
@@ -1747,15 +1735,27 @@ def choose_engaging_segment(track_path, needed_duration, payload, profile):
 
 
 def _library_music_gains(profile, payload):
-    # These values are applied AFTER loudness normalization of the music track.
-    # Speech is protected twice: explicit known speech windows + dynamic sidechain ducking.
+    """V8.3: keep the music clearly audible even while dialogue is present."""
+    level = str(payload.get("music_level") or "present").strip().lower()
+
     if profile["name"] == "playful_dance":
-        return 0.60, 0.17
-    if profile["name"] == "calm_warm":
-        return 0.44, 0.13
-    if profile["name"] == "curious_space":
-        return 0.50, 0.15
-    return 0.52, 0.15
+        normal, duck = 0.86, 0.48
+    elif profile["name"] == "calm_warm":
+        normal, duck = 0.70, 0.39
+    elif profile["name"] == "curious_space":
+        normal, duck = 0.77, 0.42
+    else:
+        normal, duck = 0.79, 0.43
+
+    if level in {"soft", "low", "gentle"}:
+        normal *= 0.86
+        duck *= 0.88
+    elif level in {"strong", "high", "loud"}:
+        normal *= 1.06
+        duck *= 1.06
+
+    duck = max(duck, normal * 0.50)
+    return min(normal, 1.05), min(duck, 0.58)
 
 
 def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment):
@@ -1772,13 +1772,13 @@ def mix_library_music_bed(video_in, track_path, output, duration, speech_windows
         f"[1:a]atrim=start={seg_start:.3f}:duration={seg_dur:.3f},asetpts=PTS-STARTPTS,"
         "aformat=sample_rates=48000:channel_layouts=stereo,"
         "highpass=f=75,lowpass=f=12000,"
-        "loudnorm=I=-23:TP=-3.0:LRA=10,"
+        "loudnorm=I=-20:TP=-2.5:LRA=9,"
         f"volume='{volume_expr}':eval=frame,"
         "afade=t=in:st=0:d=0.28,"
         f"afade=t=out:st={fade_out:.3f}:d=0.55[musicbase];"
         # Dynamic protection catches speech even if silence detection/timeline is imperfect.
         "[musicbase][speechsc]sidechaincompress="
-        "threshold=0.020:ratio=10:attack=8:release=260:makeup=1[duckedmusic];"
+        "threshold=0.080:ratio=1.8:attack=18:release=300:makeup=1:mix=0.30[duckedmusic];"
         "[main][duckedmusic]amix=inputs=2:normalize=0:duration=first,"
         "alimiter=limit=0.94[aout]"
     )
@@ -1802,7 +1802,8 @@ def mix_library_music_bed(video_in, track_path, output, duration, speech_windows
         "normal_gain": normal_gain,
         "speech_duck_gain": duck_gain,
         "dynamic_sidechain": True,
-        "music_loudnorm_target_lufs": -23,
+        "music_level": str(payload.get("music_level") or "present"),
+        "music_loudnorm_target_lufs": -20,
     }
 
 def generate_original_music_bed(dest, duration, payload):
