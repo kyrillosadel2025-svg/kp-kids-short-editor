@@ -31,9 +31,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.4 - Smart Pacing + Question Answer Side Sync"
-INTRO_DRIVE_FILE_ID = "1K0krAhogRv5ybCw7oXdf_ZwpZ1B2_Ywv"
-CLOSURE_DRIVE_FILE_ID = "1K0krAhogRv5ybCw7oXdf_ZwpZ1B2_Ywv"
+EDITOR_VERSION = "KP Kids Long Editor V1.4.1 - Audio Ducking Split Fix"
+INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
 OUTPUT_FPS = 30
@@ -922,12 +922,12 @@ def mix_music(body_video, dest, profile, seed_text=""):
     # Loop music if the compilation is longer than the track. Sidechain compressor
     # reduces the bed while source speech is present, but lets it breathe between lines.
     fc = (
-        f"[0:a]aresample=48000,volume=1.0[speech];"
+        f"[0:a]aresample=48000,volume=1.0,asplit=2[speech_sc][speech_mix];"
         f"[1:a]aresample=48000,highpass=f=70,lowpass=f=12500,"
         f"loudnorm=I=-20:TP=-2.5:LRA=9,volume={MUSIC_GAIN:.3f},"
         f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.3f}:d=1.2[music];"
-        f"[music][speech]sidechaincompress=threshold=0.080:ratio=1.8:attack=22:release=360:makeup=1:mix=0.30[ducked];"
-        f"[speech][ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+        f"[music][speech_sc]sidechaincompress=threshold=0.080:ratio=1.8:attack=22:release=360:makeup=1:mix=0.30[ducked];"
+        f"[speech_mix][ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
         f"alimiter=limit=0.95[aout]"
     )
     run([
