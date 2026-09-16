@@ -1,62 +1,1571 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.5 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Re-cuts vertical shorts into a large 4:3 focus window inside 1920x1080, with smooth character-to-lesson reframing and blurred side fill. - Preserves original speech/audio. - Adds one continuous real-music bed from the existing music/ library. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
+# KP Kids Short Editor FULL MONTAGE: pacing, typography, transitions, audio polish, music bed — NO QA / NO STORY REPAIR
+# V7.8 strong child-friendly kinetic typography pass:
+# - keeps the generated video as the visual hero and removes template-like overload.
+# - uses deterministic metadata-aware edit plans and editorial styles per episode.
+# - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
+# - keeps the generated body at an overall 0.90x child-friendly pace while intro/closure remain normal speed.
+# - uses direct 9:16 scaling when possible; blurred framing only as a fallback.
+# - ties reveal camera/color emphasis and optional SFX to real/metadata-derived edit points.
+# - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
+# - logs detailed pacing/audio/color/timing telemetry for future retention analysis.
+# - preserves robust Drive retry, intro/closure crossfades, payload and result metadata.
+# - upgrades text to readable motion cards: animated panels, clear entrance motion, stable hold, soft exit, and synchronized SFX.
+# - synchronizes audible-but-gentle generated SFX with text entrances and ducks them under dialogue.
+# - keeps motion deterministic per episode and never uses continuous wiggle/jitter.
+# - contextual scene overlays removed: motion design is now limited to typography only.
+# - avoids decorative particle fields, confetti, random squares, and persistent HUD clutter.
 
 import argparse
+import os
+import sys
+import array
 import base64
 import hashlib
-import html
 import http.cookiejar
 import json
-import math
-import os
-import random
 import re
+import math
+import random
+import wave
+import html
+import shutil
 import subprocess
-import sys
 import tempfile
 import time
+import urllib.request
 import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
-INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
-CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
-OUTPUT_W = 1920
-OUTPUT_H = 1080
-OUTPUT_FPS = 30
-VIDEO_BITRATE = "1800k"
-VIDEO_MAXRATE = "2200k"
-VIDEO_BUFSIZE = "4400k"
-AUDIO_RATE = 48000
-AUDIO_BITRATE = "128k"
-FOREGROUND_H = 1010
-SEGMENT_FADE = 0.18
-MUSIC_GAIN = 0.72
-
-# Same pacing philosophy as the Shorts editor.
-LONG_BODY_TARGET_SPEED = 0.90
-LONG_SPEECH_SPEED = 0.99
-LONG_SHORT_PAUSE_SPEED = 0.96
-LONG_MEDIUM_PAUSE_SPEED = 0.93
-LONG_LONG_PAUSE_SPEED = 0.90
-LONG_MIN_PACING_SEGMENT = 0.08
-LONG_SILENCE_DB = -33
-LONG_SILENCE_MIN_DURATION = 0.22
+# Full montage engine: no QA or story-repair dependency.
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
+INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
+SHORT_PLAYBACK_SPEED = 0.90  # approved child-friendly overall body pace; intro/closure remain 1.00x
+SPEECH_BASE_SPEED = 0.99
+SHORT_PAUSE_SPEED = 0.95
+MEDIUM_PAUSE_SPEED = 0.91
+LONG_PAUSE_SPEED = 0.87
+MIN_PACING_SEGMENT = 0.08
+SILENCE_DB = -33
+SILENCE_MIN_DURATION = 0.22
 
-LEFT_X = 105
-RIGHT_X = 1325
-SIDE_W = 500
-SIDE_TITLE_Y = 260
-SIDE_KEYWORD_Y = 700
-SIDE_CATEGORY_Y = 170
+EDITOR_VERSION = "V18 Full Montage No QA + 0.90x Body"
+TARGET_LUFS = -15.0
+TARGET_TRUE_PEAK_DB = -1.5
+MAX_ZOOM = 1.03
+ASPECT_TOLERANCE = 0.025
+SAFE_TOP = 145
+SAFE_BOTTOM = 260
+SAFE_LEFT = 70
+SAFE_RIGHT = 170
+OUTPUT_W = 1080
+OUTPUT_H = 1920
+OUTPUT_FPS = 24
+INTRO_TARGET_SECONDS = 3.25
+CLOSURE_TARGET_SECONDS = 3.40
+MIN_BRAND_CLIP_SECONDS = 3.00
 
-MUSIC_PROFILES = {
+TEXT_MOTION_DURATION = 0.44
+TEXT_BOUNCE_DURATION = 0.46
+TEXT_PANEL_DURATION = 0.36
+TEXT_ACCENT_DURATION = 0.46
+TEXT_SFX_MAX_GAIN = 0.0750
+TEXT_OPENING_MIN_HOLD = 2.80
+TEXT_OPENING_MAX_HOLD = 3.25
+TEXT_KEYWORD_MIN_HOLD = 2.90
+TEXT_KEYWORD_MAX_HOLD = 3.30
+TEXT_EXIT_FADE = 0.38
+TEXT_SHIMMER_DURATION = 0.44
+TEXT_GHOST_DURATION = 0.28
+MOTION_GRAPHICS_DURATION = 0.90
+MOTION_GRAPHICS_ENTRANCE = 0.22
+MOTION_GRAPHICS_MAX_ALPHA = 0.55
+
+
+
+
+# ---- Video generation is handled upstream by n8n/KIE (Grok fixed). ---------
+# The editor never chooses or creates a generation model; it only edits an existing RAW.
+
+def run(cmd):
+    print("+", " ".join(str(x) for x in cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+def download(url, dest):
+    raw = str(url or "").strip()
+    if raw.startswith("file://"):
+        shutil.copyfile(raw[7:], dest)
+        return
+    if raw and Path(raw).exists():
+        shutil.copyfile(raw, dest)
+        return
+    req = urllib.request.Request(raw, headers={"User-Agent": "KP-Kids-Short-Editor/3.0"})
+    with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+        while True:
+            chunk = r.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+
+
+def looks_like_mp4(path):
+    """Quick sanity check: MP4 files should contain an ftyp box near the beginning."""
+    try:
+        head = Path(path).read_bytes()[:64]
+        return b"ftyp" in head
+    except Exception:
+        return False
+
+def download_google_drive_file(file_id, dest, label="Google Drive video"):
+    """ Robust public Google Drive downloader using only the Python standard library. Improvements in V5.5: - retries transient Google 429/5xx errors - tries several Drive download endpoints - handles Drive HTML confirmation/interstitial forms - validates that the downloaded file is really an MP4 before FFmpeg sees it """
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    opener.addheaders = [
+        ("User-Agent", "Mozilla/5.0 KP-Kids-Editor/5.5"),
+        ("Accept", "*/*"),
+    ]
+
+    endpoints = [
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download",
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+        f"https://drive.google.com/file/d/{file_id}/view?usp=sharing",
+    ]
+
+    retryable = {429, 500, 502, 503, 504}
+    last_error = None
+
+    def fetch(url, attempts=3):
+        nonlocal last_error
+        for attempt in range(1, attempts + 1):
+            try:
+                req = urllib.request.Request(url)
+                with opener.open(req, timeout=180) as r:
+                    return r.read(), (r.headers.get("Content-Type") or "").lower(), r.geturl()
+            except urllib.error.HTTPError as e:
+                last_error = e
+                if e.code in retryable and attempt < attempts:
+                    wait = 2 if attempt == 1 else 6
+                    print(
+                        f"{label}: Google Drive HTTP {e.code}; retrying in {wait}s "
+                        f"({attempt}/{attempts})...",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < attempts:
+                    wait = 2 if attempt == 1 else 6
+                    print(
+                        f"{label}: download attempt failed; retrying in {wait}s "
+                        f"({attempt}/{attempts})...",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("unreachable")
+
+    def save_if_mp4(data, ctype):
+        Path(dest).write_bytes(data)
+        return "text/html" not in ctype and looks_like_mp4(dest)
+
+    def candidate_urls_from_html(html_text, base_url):
+        candidates = []
+
+        # Direct links / JSON download URL exposed by Drive pages.
+        patterns = [
+            r'href="([^"]*?/uc\?export=download[^"]+)"',
+            r'action="([^"]*?/download[^"]+)"',
+            r'"downloadUrl":"([^"]+)"',
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, html_text):
+                u = html.unescape(m.group(1))
+                u = (
+                    u.replace("\u003d", "=")
+                     .replace("\u0026", "&")
+                     .replace("\\/", "/")
+                )
+                if u.startswith("/"):
+                    u = urllib.parse.urljoin(base_url, u)
+                if u.startswith("http"):
+                    candidates.append(u)
+
+        # Drive confirmation forms commonly contain hidden confirm / uuid values.
+        form = re.search(
+            r'<form[^>]+(?:id="download-form"[^>]*|action="([^"]*/download[^"]*)")[^>]*>(.*?)</form>',
+            html_text,
+            re.I | re.S,
+        )
+        if form:
+            whole = form.group(0)
+            action_m = re.search(r'action="([^"]+)"', whole, re.I)
+            action = html.unescape(action_m.group(1)) if action_m else (
+                "https://drive.usercontent.google.com/download"
+            )
+            action = urllib.parse.urljoin(base_url, action)
+
+            params = {}
+            for m in re.finditer(
+                r'<input[^>]+type="hidden"[^>]+name="([^"]+)"[^>]+value="([^"]*)"',
+                whole,
+                re.I,
+            ):
+                params[html.unescape(m.group(1))] = html.unescape(m.group(2))
+
+            # Some markup uses value before name.
+            for m in re.finditer(
+                r'<input[^>]+value="([^"]*)"[^>]+name="([^"]+)"[^>]+type="hidden"',
+                whole,
+                re.I,
+            ):
+                params[html.unescape(m.group(2))] = html.unescape(m.group(1))
+
+            params.setdefault("id", file_id)
+            params.setdefault("export", "download")
+            if params:
+                candidates.append(action + "?" + urllib.parse.urlencode(params))
+
+        # Fallback token scrape.
+        m = re.search(r'confirm=([0-9A-Za-z_-]+)', html_text)
+        if m:
+            candidates.append(
+                "https://drive.usercontent.google.com/download?"
+                + urllib.parse.urlencode(
+                    {"id": file_id, "export": "download", "confirm": m.group(1)}
+                )
+            )
+
+        # Preserve order while removing duplicates.
+        seen = set()
+        uniq = []
+        for u in candidates:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        return uniq
+
+    for first_url in endpoints:
+        try:
+            data, ctype, final_url = fetch(first_url)
+
+            if save_if_mp4(data, ctype):
+                print(f"{label}: downloaded successfully.", flush=True)
+                return
+
+            # Google returned HTML: try confirmation/form/download links from the page.
+            html_text = data.decode("utf-8", errors="ignore")
+            candidates = candidate_urls_from_html(html_text, final_url)
+
+            for u in candidates:
+                try:
+                    data2, ctype2, _ = fetch(u)
+                    if save_if_mp4(data2, ctype2):
+                        print(f"{label}: downloaded successfully after Drive confirmation.", flush=True)
+                        return
+                except Exception as e:
+                    last_error = e
+
+            if "text/html" in ctype:
+                last_error = RuntimeError(
+                    f"{label}: Google Drive returned an HTML page instead of the MP4. "
+                    "Make sure sharing is 'Anyone with the link -> Viewer'."
+                )
+            else:
+                last_error = RuntimeError(
+                    f"{label}: downloaded data is not a valid MP4 file."
+                )
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise RuntimeError(
+        f"Could not download {label} from Google Drive after retries. "
+        "Check that the file ID is correct and sharing is 'Anyone with the link -> Viewer'."
+    ) from last_error
+
+
+def ffprobe_video_info(path):
+    """Return robust stream/format information using one ffprobe JSON call."""
+    p = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_streams", "-show_format", str(path)
+        ],
+        capture_output=True, text=True, check=True
+    )
+    data = json.loads(p.stdout or "{}")
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    duration = 0.0
+    for candidate in (
+        (data.get("format") or {}).get("duration"),
+        video.get("duration"),
+        (audio or {}).get("duration") if audio else None,
+    ):
+        try:
+            if candidate is not None:
+                duration = max(duration, float(candidate))
+        except (TypeError, ValueError):
+            pass
+    return {
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "duration": duration,
+        "has_audio": audio is not None,
+        "video_codec": video.get("codec_name") or "",
+        "audio_codec": (audio or {}).get("codec_name") or "",
+    }
+
+
+def ffprobe_duration(path):
+    return ffprobe_video_info(path)["duration"]
+
+
+def esc(s):
+    return (
+        str(s or "")
+        .replace("'", "’")
+        .replace("\\", r"\\")
+        .replace(":", r"\:")
+        .replace("%", r"\%")
+        .replace(",", r"\,")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+    )
+
+
+def fade_alpha(start, end, fade=0.18):
+    span = max(end - start, 0.02)
+    fade = min(fade, span / 2)
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+fade:.3f}),(t-{start:.3f})/{fade:.3f},"
+        f"if(lt(t,{end-fade:.3f}),1,"
+        f"if(lt(t,{end:.3f}),({end:.3f}-t)/{fade:.3f},0))))"
+    )
+
+
+def soft_rise_y(base_y, start, pixels=8.0, settle=0.28):
+    """Small, premium rise rather than an exaggerated pop animation."""
+    return (
+        f"{base_y}+if(lt(t,{start:.3f}),{pixels:.1f},"
+        f"if(lt(t,{start+settle:.3f}),"
+        f"{pixels:.1f}*(1-(t-{start:.3f})/{settle:.3f}),0))"
+    )
+
+
+def motion_slide_x(base_expr, start, offset=80.0, dur=TEXT_MOTION_DURATION):
+    """Short decelerating horizontal entrance, then perfectly still for readability."""
+    return (
+        f"({base_expr})+if(lt(t,{start:.3f}),{offset:.1f},"
+        f"if(lt(t,{start+dur:.3f}),{offset:.1f}*"
+        f"(1-(t-{start:.3f})/{dur:.3f})*(1-(t-{start:.3f})/{dur:.3f}),0))"
+    )
+
+
+def motion_rise_y(base_y, start, pixels=14.0, dur=TEXT_MOTION_DURATION):
+    """Premium short upward settle; motion stops after ~250 ms."""
+    return (
+        f"{base_y}+if(lt(t,{start:.3f}),{pixels:.1f},"
+        f"if(lt(t,{start+dur:.3f}),{pixels:.1f}*"
+        f"(1-(t-{start:.3f})/{dur:.3f})*(1-(t-{start:.3f})/{dur:.3f}),0))"
+    )
+
+
+def motion_pop_y(base_y, start, amp=15.0, dur=TEXT_BOUNCE_DURATION):
+    """One restrained spring-in used only for playful reveal words."""
+    # Decaying oscillation is limited to the entrance window; after that text is static.
+    return (
+        f"{base_y}+if(lt(t,{start:.3f}),{amp:.1f},"
+        f"if(lt(t,{start+dur:.3f}),"
+        f"{amp:.1f}*exp(-10*(t-{start:.3f}))*cos(19*(t-{start:.3f})),0))"
+    )
+
+
+def motion_unit(start, dur):
+    """0..1 linear progress expression clipped to the entrance window."""
+    return f"min(max((t-{start:.3f})/{max(dur,0.05):.3f},0),1)"
+
+
+def motion_ease_out(start, dur):
+    """Quadratic ease-out used by card/underline motion."""
+    u = motion_unit(start, dur)
+    return f"(1-(1-{u})*(1-{u}))"
+
+
+def motion_panel_width(width, start, dur=TEXT_PANEL_DURATION, start_scale=0.68):
+    p = motion_ease_out(start, dur)
+    return f"({width}*({start_scale:.3f}+(1-{start_scale:.3f})*{p}))"
+
+
+def motion_panel_x(center_x, width, start, dur=TEXT_PANEL_DURATION, start_scale=0.68):
+    w = motion_panel_width(width, start, dur, start_scale)
+    return f"({center_x}-({w})/2)"
+
+
+
+def motion_card_scale(start, end, in_dur=0.40, out_dur=0.32, start_scale=0.58, end_scale=0.72):
+    """Strong but clean card motion: expand -> 4% overshoot -> settle -> long hold -> soft exit."""
+    in_dur = max(0.12, min(in_dur, max(0.14, (end-start)*0.30)))
+    out_dur = max(0.10, min(out_dur, max(0.12, (end-start)*0.25)))
+    peak_dur = in_dur * 0.68
+    settle_dur = max(in_dur - peak_dur, 0.06)
+    peak_t = start + peak_dur
+    in_end = start + in_dur
+    out_start = max(in_end, end - out_dur)
+    up = f"min(max((t-{start:.3f})/{peak_dur:.3f},0),1)"
+    settle = f"min(max((t-{peak_t:.3f})/{settle_dur:.3f},0),1)"
+    uout = f"min(max((t-{out_start:.3f})/{out_dur:.3f},0),1)"
+    ease_up = f"(1-(1-{up})*(1-{up}))"
+    ease_settle = f"({settle}*{settle}*(3-2*{settle}))"
+    ease_out = f"({uout}*{uout})"
+    return (
+        f"if(lt(t,{peak_t:.3f}),"
+        f"{start_scale:.3f}+(1.040-{start_scale:.3f})*{ease_up},"
+        f"if(lt(t,{in_end:.3f}),1.040+(1-1.040)*{ease_settle},"
+        f"if(lt(t,{out_start:.3f}),1,"
+        f"1-(1-{end_scale:.3f})*{ease_out})))"
+    )
+
+
+def kinetic_panel_width(width, start, end, start_scale=0.46):
+    sc = motion_card_scale(start, end, start_scale=start_scale)
+    return f"({width}*({sc}))"
+
+
+def kinetic_panel_x(center_x, width, start, end, start_scale=0.46):
+    w = kinetic_panel_width(width, start, end, start_scale)
+    return f"({center_x}-({w})/2)"
+
+
+def kinetic_shimmer_x(card_left, card_width, start, dur=TEXT_SHIMMER_DURATION):
+    """A broad soft sheen that stays attached to the text card, never the scene."""
+    u = motion_unit(start, dur)
+    return f"({card_left}-90+({card_width}+180)*{u})"
+
+
+def ghost_alpha(start, dur=TEXT_GHOST_DURATION, peak=0.16):
+    """Short motion-trail alpha used only during fast text entrance."""
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+dur:.3f}),{peak:.3f}*(1-(t-{start:.3f})/{dur:.3f}),0))"
+    )
+
+
+def kinetic_fontsize_expr(base_size, start, dur=0.44, start_scale=0.85, overshoot=1.08):
+    """Readable 85% -> 108% -> 100% scale impact, then perfectly static."""
+    dur = max(float(dur), 0.18)
+    peak_dur = dur * 0.64
+    settle_dur = max(dur - peak_dur, 0.06)
+    peak_t = start + peak_dur
+    end_t = start + dur
+    up = f"min(max((t-{start:.3f})/{peak_dur:.3f},0),1)"
+    down = f"min(max((t-{peak_t:.3f})/{settle_dur:.3f},0),1)"
+    ease_up = f"(1-(1-{up})*(1-{up}))"
+    ease_down = f"({down}*{down}*(3-2*{down}))"
+    return (
+        f"if(lt(t,{peak_t:.3f}),"
+        f"{base_size}*({start_scale:.3f}+({overshoot:.3f}-{start_scale:.3f})*{ease_up}),"
+        f"if(lt(t,{end_t:.3f}),"
+        f"{base_size}*({overshoot:.3f}+(1-{overshoot:.3f})*{ease_down}),"
+        f"{base_size}))"
+    )
+
+
+def entrance_only_alpha(start, dur=0.42, peak=0.65):
+    """Quick glow/outline flash that disappears once the title settles."""
+    return (
+        f"if(lt(t,{start:.3f}),0,"
+        f"if(lt(t,{start+dur/2:.3f}),{peak:.3f}*(t-{start:.3f})/{dur/2:.3f},"
+        f"if(lt(t,{start+dur:.3f}),{peak:.3f}*({start+dur:.3f}-t)/{dur/2:.3f},0)))"
+    )
+
+
+def lesson_accent_color(payload, fallback="0xFFD54A"):
+    """Return a lesson-specific accent when the lesson itself names a color."""
+    key = str(payload.get("lesson_key") or "").lower()
+    topic = str(payload.get("topic") or "").lower()
+    hay = f"{key} {topic}"
+    colors = {
+        "red": "0xFF4D5A",
+        "blue": "0x4DA3FF",
+        "yellow": "0xFFD84D",
+        "green": "0x55C878",
+        "orange": "0xFF9B42",
+        "purple": "0x9B6BFF",
+        "pink": "0xFF78B7",
+        "black": "0x222222",
+        "white": "0xF5F5F5",
+    }
+    for name, value in colors.items():
+        if re.search(rf"\b{name}\b", hay):
+            return value
+    return fallback
+
+
+def shape_symbol_from_payload(payload):
+    """Simple glyphs that DejaVu Sans renders reliably; empty means no safe glyph."""
+    hay = f"{payload.get('lesson_key','')} {payload.get('topic','')}".lower()
+    mapping = [
+        ("triangle", "△"),
+        ("circle", "○"),
+        ("square", "□"),
+        ("rectangle", "▭"),
+        ("star", "★"),
+        ("heart", "♥"),
+        ("diamond", "◇"),
+        ("oval", "○"),
+    ]
+    for needle, glyph in mapping:
+        if needle in hay:
+            return glyph
+    return ""
+
+
+def build_motion_graphics_plan(payload, edit_plan, theme):
+    """ Contextual scene overlays are intentionally disabled. Earlier builds drew scan lines, brackets, arrows, badges and color sweeps over the generated scene. Without object tracking these cues could land in visually wrong places and made the edit feel synthetic. V7.4 keeps motion design on the typography itself only. """
+    return {
+        "type": "none",
+        "sfx": "none",
+        "reason": "disabled_scene_overlays_keep_motion_on_text_only",
+        "duration": 0.0,
+        "entrance": 0.0,
+    }
+
+def build_motion_typography_plan(payload, edit_plan):
+    """ Child-friendly kinetic typography inspired by the supplied reference: the card arrives first, text follows with a brief trail/overshoot, a soft sheen completes the reveal, then everything holds still long enough to read. """
+    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
+    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style, "kids-kinetic-v77")
+
+    if style == "CALM_LEARNING":
+        opening_motion = "soft_magic"
+        keyword_motion = "soft_magic"
+        opening_sfx = "none"
+        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+    elif style == "COUNT_AND_PLAY":
+        opening_motion = "bubble_pop"
+        keyword_motion = "bubble_pop"
+        opening_sfx = "kid_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "kid_reward" if edit_plan.get("show_keyword") else "none"
+    elif style == "PLAYFUL_QUIZ":
+        opening_motion = "speed_slide_left" if h % 2 == 0 else "speed_slide_right"
+        keyword_motion = "magic_wipe"
+        opening_sfx = "kid_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "kid_reward" if edit_plan.get("show_keyword") else "none"
+    elif style == "STORY_MODE":
+        opening_motion = "soft_magic"
+        keyword_motion = "magic_wipe"
+        opening_sfx = "none"
+        keyword_sfx = "soft_ding" if edit_plan.get("show_keyword") else "none"
+    else:
+        opening_motion = "magic_wipe" if h % 3 else ("speed_slide_left" if h % 2 else "speed_slide_right")
+        keyword_motion = "bubble_pop" if h % 4 == 0 else "magic_wipe"
+        opening_sfx = "kid_whoosh" if edit_plan.get("opening") != "none" else "none"
+        keyword_sfx = "kid_reward" if edit_plan.get("show_keyword") else "none"
+
+    if edit_plan.get("opening") == "none":
+        opening_sfx = "none"
+    if not edit_plan.get("show_keyword"):
+        keyword_sfx = "none"
+
+    return {
+        "opening_motion": opening_motion,
+        "keyword_motion": keyword_motion,
+        "opening_sfx": opening_sfx,
+        "keyword_sfx": keyword_sfx,
+        "motion_duration": TEXT_MOTION_DURATION,
+        "bounce_duration": TEXT_BOUNCE_DURATION,
+        "panel_duration": TEXT_PANEL_DURATION,
+        "shimmer_duration": TEXT_SHIMMER_DURATION,
+        "ghost_duration": TEXT_GHOST_DURATION,
+    }
+
+def stable_hash_int(*parts):
+    raw = "|".join(str(p or "") for p in parts)
+    return int.from_bytes(hashlib.sha256(raw.encode("utf-8")).digest()[:8], "big")
+
+
+def category_label(category):
+    mapping = {
+        "alphabet": "ALPHABET", "letters": "LETTER MATCH", "phonics": "PHONICS",
+        "numbers": "NUMBERS", "counting": "COUNTING", "shapes": "SHAPES",
+        "colors": "COLORS", "science": "SCIENCE", "space": "SPACE",
+        "nature": "NATURE", "body": "HEALTHY BODY", "safety": "SAFE & SMART",
+        "emotions": "FEELINGS", "manners": "KINDNESS", "community": "HELPERS",
+        "transport": "LET'S GO", "weather": "WEATHER", "animals": "ANIMALS",
+        "food": "FOOD", "math": "MATH", "opposites": "OPPOSITES",
+        "world": "WORLD", "positions": "POSITION WORDS", "sorting": "SORTING",
+        "patterns": "PATTERNS", "sizes": "SIZES", "directions": "DIRECTIONS",
+        "calendar": "CALENDAR", "seasons": "SEASONS", "time": "ROUTINES",
+    }
+    return mapping.get(str(category or "").lower(), "KP KIDS")
+
+
+def category_theme(category):
+    c = str(category or "").lower()
+    themes = {
+        "alphabet":  {"box":"0x2E86FF", "accent":"0xFFD54A"},
+        "letters":   {"box":"0x3F7DFF", "accent":"0xFFD54A"},
+        "phonics":   {"box":"0x6A5AE0", "accent":"0xFFB347"},
+        "numbers":   {"box":"0x28B463", "accent":"0xFFA630"},
+        "counting":  {"box":"0x16A085", "accent":"0xF5B041"},
+        "shapes":    {"box":"0x8E44AD", "accent":"0x5DADE2"},
+        "colors":    {"box":"0xFF5E7E", "accent":"0x7DFF7A"},
+        "science":   {"box":"0x1F618D", "accent":"0x76D7C4"},
+        "space":     {"box":"0x34495E", "accent":"0xF4D03F"},
+        "nature":    {"box":"0x239B56", "accent":"0x7DCEA0"},
+        "body":      {"box":"0xE67E22", "accent":"0xF8C471"},
+        "safety":    {"box":"0xC0392B", "accent":"0xF7DC6F"},
+        "emotions":  {"box":"0xEC7063", "accent":"0xF8C471"},
+        "manners":   {"box":"0xAF7AC5", "accent":"0xF9E79F"},
+        "community": {"box":"0x2980B9", "accent":"0xAED6F1"},
+        "transport": {"box":"0x2874A6", "accent":"0xF5B041"},
+        "weather":   {"box":"0x5DADE2", "accent":"0xF7DC6F"},
+        "animals":   {"box":"0x27AE60", "accent":"0xF4D03F"},
+        "food":      {"box":"0xE74C3C", "accent":"0x82E0AA"},
+        "math":      {"box":"0x16A085", "accent":"0xF8C471"},
+        "opposites": {"box":"0x6C5CE7", "accent":"0xFFEAA7"},
+        "world":     {"box":"0x2874A6", "accent":"0x58D68D"},
+        "positions": {"box":"0x7D3C98", "accent":"0xF7DC6F"},
+        "sorting":   {"box":"0x17A589", "accent":"0xF8C471"},
+        "patterns":  {"box":"0xAF601A", "accent":"0xAED6F1"},
+        "sizes":     {"box":"0x884EA0", "accent":"0xF9E79F"},
+        "directions":{"box":"0x2E86C1", "accent":"0xF8C471"},
+        "calendar":  {"box":"0xCB4335", "accent":"0xF9E79F"},
+        "seasons":   {"box":"0x239B56", "accent":"0x5DADE2"},
+        "time":      {"box":"0x566573", "accent":"0xF8C471"},
+    }
+    return themes.get(c, {"box":"0x3A7BFF", "accent":"0xFFD54A"})
+
+
+def clean_topic(topic):
+    t = re.sub(r"#Shorts\b", "", str(topic or ""), flags=re.I).strip()
+    t = re.sub(r"\s+", " ", t)
+    # Titles may contain channel boilerplate. Keep the educational phrase only.
+    t = re.sub(r"\s+with\s+Kevin.*$", "", t, flags=re.I).strip()
+    t = re.sub(r"^(Quick Quiz|Choose One|Guess and Reveal|Kids Discovery)\s*:\s*", "", t, flags=re.I)
+    return t[:42]
+
+
+def keyword_from_lesson(payload):
+    category = str(payload.get("category") or "").lower()
+    lesson_key = str(payload.get("lesson_key") or "").lower()
+    topic = clean_topic(payload.get("topic") or payload.get("title") or "")
+
+    # Strong structured cases first.
+    m = re.search(r"(?:number|count)-(\d+)$", lesson_key)
+    if m:
+        return m.group(1)
+    m = re.search(r"(?:letter-|pair-)([a-z])$", lesson_key)
+    if m:
+        return m.group(1).upper()
+
+    parts = [p for p in lesson_key.split("-") if p]
+    stop = {
+        category, "number", "count", "letter", "pair", "sound", "color", "shape",
+        "lesson", "job", "time", "feeling", "weather", "habitat", "routine",
+    }
+    meaningful = [p for p in parts if p not in stop and len(p) > 1]
+    if meaningful:
+        # Prefer the final concept (science-sink-float -> FLOAT; space-astronaut -> ASTRONAUT).
+        candidate = meaningful[-1]
+        aliases = {
+            "float": "FLOATS", "happy": "HAPPY", "sad": "SAD", "angry": "ANGRY",
+            "calm": "CALM", "earth": "EARTH", "moon": "MOON", "sun": "SUN",
+            "astronaut": "ASTRONAUT", "triangle": "TRIANGLE", "rectangle": "RECTANGLE",
+            "circle": "CIRCLE", "square": "SQUARE", "rainbow": "RAINBOW",
+        }
+        return aliases.get(candidate, candidate.replace("_", " ").upper())[:18]
+
+    bad = {
+        "and", "the", "with", "for", "from", "into", "about", "this", "that",
+        "time", "kids", "learn", "learning", "number", "color", "job", "fun",
+    }
+    words = [w.strip(".,!?;:-_()[]{}'\"") for w in topic.split()]
+    candidates = [w for w in words if len(w) >= 2 and w.lower() not in bad]
+    if not candidates:
+        return ""
+    return candidates[-1].upper()[:18]
+
+
+def parse_timeline_event(timeline, keywords):
+    """Find the first timeline segment whose text contains any keyword."""
+    text = str(timeline or "")
+    for line in text.splitlines():
+        low = line.lower()
+        if not any(k in low for k in keywords):
+            continue
+        m = re.search(r"(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
+        if m:
+            return (float(m.group(1)) + float(m.group(2))) / 2.0
+        m = re.search(r"(?:at\s*)?(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def detect_silence_intervals(path, duration):
+    """Detect real quiet windows from the source audio using FFmpeg silencedetect."""
+    info = ffprobe_video_info(path)
+    if not info["has_audio"] or duration <= 0:
+        return []
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-t", f"{duration:.3f}", "-i", str(path),
+        "-af", f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_MIN_DURATION}",
+        "-f", "null", "-"
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", text)]
+    ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", text)]
+    intervals = []
+    for i, st in enumerate(starts):
+        en = ends[i] if i < len(ends) else duration
+        st = max(0.0, min(st, duration))
+        en = max(st, min(en, duration))
+        if en - st >= SILENCE_MIN_DURATION - 0.01:
+            intervals.append((st, en))
+    # Merge overlapping/adjacent detections defensively.
+    merged = []
+    for st, en in sorted(intervals):
+        if merged and st <= merged[-1][1] + 0.03:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return merged
+
+
+def complement_intervals(intervals, duration):
+    """Return non-silent intervals over [0,duration]."""
+    out = []
+    cur = 0.0
+    for st, en in intervals:
+        if st > cur + MIN_PACING_SEGMENT:
+            out.append((cur, st))
+        cur = max(cur, en)
+    if duration > cur + MIN_PACING_SEGMENT:
+        out.append((cur, duration))
+    return out
+
+
+def _pause_speed(length):
+    if length >= 0.85:
+        return LONG_PAUSE_SPEED
+    if length >= 0.45:
+        return MEDIUM_PAUSE_SPEED
+    return SHORT_PAUSE_SPEED
+
+
+def build_pacing_plan(duration, silence_intervals):
+    """ Build deterministic A/V pacing segments. Speech stays very close to natural speed, while real pauses breathe a little more. Speeds are globally normalized so total duration stays close to the approved 0.90x body target instead of growing unpredictably. """
+    if duration <= 0:
+        return {"segments": [], "output_duration": 0.0, "target_duration": 0.0}
+
+    # Convert silence regions + complement into one ordered segmentation.
+    marks = {0.0, duration}
+    for st, en in silence_intervals:
+        marks.add(max(0.0, min(st, duration)))
+        marks.add(max(0.0, min(en, duration)))
+    marks = sorted(marks)
+    raw = []
+    for a, b in zip(marks, marks[1:]):
+        if b - a < MIN_PACING_SEGMENT:
+            continue
+        mid = (a + b) / 2.0
+        is_silence = any(st <= mid <= en for st, en in silence_intervals)
+        speed = _pause_speed(b-a) if is_silence else SPEECH_BASE_SPEED
+        raw.append({"source_start": a, "source_end": b, "kind": "silence" if is_silence else "speech", "speed": speed})
+
+    if not raw:
+        raw = [{"source_start": 0.0, "source_end": duration, "kind": "speech", "speed": SHORT_PLAYBACK_SPEED}]
+
+    target_duration = duration / SHORT_PLAYBACK_SPEED
+    current = sum((x["source_end"]-x["source_start"]) / x["speed"] for x in raw)
+    factor = current / target_duration if target_duration > 0 else 1.0
+    for x in raw:
+        # Preserve the relationship (speech faster, pauses slower) while targeting the same overall duration.
+        x["speed"] = min(1.0, max(0.86, x["speed"] * factor))
+
+    # Recompute output timeline after clamping.
+    out_t = 0.0
+    segments = []
+    for x in raw:
+        seg = dict(x)
+        seg["output_start"] = out_t
+        seg_dur = (x["source_end"]-x["source_start"]) / x["speed"]
+        out_t += seg_dur
+        seg["output_end"] = out_t
+        segments.append(seg)
+
+    return {
+        "segments": segments,
+        "output_duration": out_t,
+        "target_duration": target_duration,
+        "silence_count": len(silence_intervals),
+    }
+
+
+def map_source_time_to_output(seconds, pacing_plan):
+    try:
+        t = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        return None
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return t / SHORT_PLAYBACK_SPEED
+    for seg in segs:
+        if t <= seg["source_end"] + 1e-6:
+            local = max(0.0, t - seg["source_start"])
+            return seg["output_start"] + local / seg["speed"]
+    return pacing_plan.get("output_duration", t / SHORT_PLAYBACK_SPEED)
+
+
+def map_intervals_to_output(intervals, pacing_plan):
+    out = []
+    for st, en in intervals:
+        ost = map_source_time_to_output(st, pacing_plan)
+        oen = map_source_time_to_output(en, pacing_plan)
+        if ost is not None and oen is not None and oen > ost:
+            out.append((ost, oen))
+    return out
+
+
+def choose_event_from_silence(silence_intervals, duration, window_start, window_end):
+    """Use the end of a real pause as a natural edit point when metadata is missing."""
+    candidates = []
+    lo, hi = duration * window_start, duration * window_end
+    target = duration * ((window_start + window_end) / 2.0)
+    for st, en in silence_intervals:
+        mid = (st + en) / 2.0
+        if lo <= mid <= hi and en - st >= 0.28:
+            score = abs(mid-target) - min(en-st, 1.2) * 0.35
+            candidates.append((score, en + 0.05))
+    return min(candidates)[1] if candidates else None
+
+
+
+STORY_EARLY_MARGIN = 0.30
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+
+# ---- V12 Visual Story Analyzer ------------------------------------------------
+# Metadata tells us WHAT event should be a question/reveal; pixels verify WHEN the
+# reveal-looking visual state is already present. This deliberately avoids pretending
+# that raw pixel math understands semantics. It is a conservative spoiler guard.
+VISUAL_SAMPLE_FPS = 4.0
+VISUAL_W = 96
+VISUAL_H = 160
+VISUAL_PERSISTENT_MIN_SIM = 0.86
+VISUAL_PRE_POST_MARGIN = 0.035
+
+
+
+
+
+
+
+# ---- V13 Semantic Story Repair -----------------------------------------------
+SEMANTIC_REPAIR_MIN_CONFIDENCE = 0.82
+SEMANTIC_SEGMENT_MIN_SECONDS = 0.18
+SEMANTIC_SEGMENT_MAX_COUNT = 10
+SEMANTIC_SEGMENT_OVERLAP_EPSILON = 0.005
+STORY_BLOCK_EXIT_CODE = 3
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def build_timing_plan(payload, source_duration, pacing_plan, silence_intervals):
+    timeline = payload.get("dialogue_timeline") or ""
+    reveal_src = payload.get("reveal_time")
+    interaction_src = payload.get("interaction_time")
+    if reveal_src is None:
+        reveal_src = parse_timeline_event(timeline, ["reveal", "answer", "correct", "result"])
+    if interaction_src is None:
+        interaction_src = parse_timeline_event(timeline, ["challenge", "viewer", "particip", "your turn", "response"])
+
+    # If metadata is unavailable, use genuine quiet windows as natural edit points.
+    if reveal_src is None:
+        reveal_src = choose_event_from_silence(silence_intervals, source_duration, 0.24, 0.58)
+    if interaction_src is None:
+        interaction_src = choose_event_from_silence(silence_intervals, source_duration, 0.58, 0.88)
+
+    duration = pacing_plan.get("output_duration") or source_duration / SHORT_PLAYBACK_SPEED
+    reveal = map_source_time_to_output(reveal_src, pacing_plan) if reveal_src is not None else None
+    interaction = map_source_time_to_output(interaction_src, pacing_plan) if interaction_src is not None else None
+
+    if reveal is None:
+        reveal = duration * 0.36
+    if interaction is None:
+        interaction = duration * 0.68
+
+    if duration < 6.0:
+        reveal = min(max(reveal, duration * 0.28), max(duration * 0.62, 0.8))
+        interaction = min(max(interaction, reveal + 0.45), max(reveal + 0.45, duration - 0.35))
+    else:
+        reveal = min(max(reveal, 2.6), duration - 2.4)
+        interaction = min(max(interaction, reveal + 1.4), duration - 0.9)
+
+    # Long-hold child-readable typography. Motion happens quickly, then the text
+    # remains still long enough to actually read. Longer labels get a little more hold time.
+    opening_text = clean_topic(payload.get("topic") or payload.get("title") or "")
+    keyword_text = keyword_from_lesson(payload) or ""
+    opening_hold = min(TEXT_OPENING_MAX_HOLD, TEXT_OPENING_MIN_HOLD + max(0, len(opening_text) - 10) * 0.025)
+    keyword_hold = min(TEXT_KEYWORD_MAX_HOLD, TEXT_KEYWORD_MIN_HOLD + max(0, len(keyword_text) - 7) * 0.035)
+
+    opening_start = 0.22
+    # Keep the opening card comfortably clear of the reveal card when possible.
+    opening_end = min(duration - 1.0, opening_start + opening_hold, max(opening_start + 1.8, reveal - 0.38))
+    keyword_start = max(0.0, reveal - 0.06)
+    keyword_end = min(duration - 0.85, keyword_start + keyword_hold)
+    # If interaction begins very early, retain at least two seconds of readable keyword time.
+    if interaction > keyword_start + 2.0:
+        keyword_end = min(keyword_end, max(keyword_start + 2.0, interaction - 0.20))
+
+    return {
+        "opening_start": opening_start,
+        "opening_end": opening_end,
+        "reveal": reveal,
+        "keyword_start": keyword_start,
+        "keyword_end": keyword_end,
+        "interaction": interaction,
+        "fade_out_start": max(0.0, duration - 0.20),
+        "reveal_source_time": reveal_src,
+        "interaction_source_time": interaction_src,
+        "opening_hold_seconds": max(0.0, opening_end - opening_start),
+        "keyword_hold_seconds": max(0.0, keyword_end - keyword_start),
+    }
+
+def choose_editorial_style(payload):
+    category = str(payload.get("category") or "").lower()
+    fmt = str(payload.get("episode_format") or "").lower()
+    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), category, fmt)
+
+    if category in {"counting", "numbers", "patterns", "sorting"}:
+        return "COUNT_AND_PLAY"
+    if category in {"emotions", "body", "time", "manners"} and h % 3 != 0:
+        return "CALM_LEARNING"
+    if any(k in fmt for k in ("quiz", "choose", "find", "pattern", "guess", "scan", "mistake")):
+        return "PLAYFUL_QUIZ"
+    if any(k in fmt for k in ("story", "mystery", "before", "experiment")):
+        return "STORY_MODE"
+    return ["CLEAN_DISCOVERY", "PLAYFUL_QUIZ", "STORY_MODE"][h % 3]
+
+
+def build_edit_plan(payload, duration):
+    category = str(payload.get("category") or "").lower()
+    topic = clean_topic(payload.get("topic") or payload.get("title") or "")
+    keyword = keyword_from_lesson(payload)
+    style = choose_editorial_style(payload)
+    h = stable_hash_int(payload.get("short_id"), payload.get("lesson_key"), style)
+
+    # Intro + closure already carry the brand. Keep the lesson body visually clean.
+    show_brand = False
+
+    # One opening idea only, and only when it adds information. Mystery/guess/find/reveal
+    # formats often already communicate the hook visually, so avoid duplicating it with text.
+    fmt = str(payload.get("episode_format") or "").lower()
+    has_format_metadata = bool(fmt.strip())
+    visual_hook_format = any(k in fmt for k in (
+        "mystery", "guess", "reveal", "find", "choose", "what-happens",
+        "mistake", "odd", "scan", "before-after"
+    ))
+    if not has_format_metadata:
+        # The generated scene may already contain hook text. Without trustworthy format
+        # metadata, stay clean instead of stacking another opening title over it.
+        opening = "none"
+    elif visual_hook_format:
+        opening = "none"
+    elif style == "STORY_MODE":
+        opening = "none" if h % 3 != 0 else ("topic" if topic else "none")
+    elif style == "PLAYFUL_QUIZ":
+        # Keep some quiz episodes completely clean so the generated visual hook can lead.
+        opening = "none" if h % 3 == 0 else ("topic" if topic and len(topic) <= 30 else "category")
+    elif style == "COUNT_AND_PLAY":
+        opening = "category"
+    elif style == "CALM_LEARNING":
+        opening = "topic" if topic and h % 3 != 0 else "none"
+    else:
+        opening = "topic" if topic and h % 2 == 0 else "category"
+
+    # Reach Mode leaves the first 2–3 seconds completely to the visual/audio hook.
+    # Keep the later reveal keyword, but suppress editorial opening/topic cards.
+    if payload.get("reach_mode", True):
+        opening = "none"
+
+    show_keyword = bool(keyword) and style in {"CLEAN_DISCOVERY", "PLAYFUL_QUIZ", "COUNT_AND_PLAY"}
+    if style == "CLEAN_DISCOVERY" and h % 4 == 0:
+        show_keyword = False
+
+    use_progress = style == "COUNT_AND_PLAY" and category in {"counting", "numbers", "patterns"}
+    camera_mode = {
+        "CLEAN_DISCOVERY": "REVEAL_PUSH",
+        "PLAYFUL_QUIZ": "REVEAL_PUSH",
+        "CALM_LEARNING": "STATIC",
+        "COUNT_AND_PLAY": "GENTLE_PUSH",
+        "STORY_MODE": "REVEAL_PUSH",
+    }[style]
+
+    # Closure already performs the real ending, so the body avoids a second end card.
+    return {
+        "style": style,
+        "show_brand": show_brand,
+        "opening": opening,
+        "show_keyword": show_keyword,
+        "show_caption": False,
+        "use_progress": use_progress,
+        "camera_mode": camera_mode,
+        "end_card_style": "none",
+        "use_reveal_sfx": show_keyword and style in {"PLAYFUL_QUIZ", "COUNT_AND_PLAY"},
+    }
+
+
+def build_text_plan(payload, edit_plan):
+    topic = clean_topic(payload.get("topic") or payload.get("title") or "")
+    category = str(payload.get("category") or "").lower()
+    return {
+        "category": category_label(category)[:24],
+        "topic": topic[:34],
+        "keyword": keyword_from_lesson(payload)[:18],
+    }
+
+
+def is_near_vertical_9_16(width, height):
+    if width <= 0 or height <= 0:
+        return True
+    return abs((width / height) - (9 / 16)) <= ASPECT_TOLERANCE
+
+
+def merge_intervals(intervals, gap=0.12):
+    merged = []
+    for st, en in sorted(intervals):
+        if merged and st <= merged[-1][1] + gap:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
+        else:
+            merged.append((st, en))
+    return merged
+
+
+def speech_enable_expr(speech_windows):
+    windows = merge_intervals(speech_windows, gap=0.10)
+    if not windows:
+        return None
+    terms = [f"between(t,{st:.3f},{en:.3f})" for st, en in windows[:18]]
+    return "+".join(terms)
+
+
+def category_color_plan(category):
+    """Subtle editorial color polish; never a heavy look/LUT."""
+    c = str(category or "").lower()
+    # Values intentionally conservative to preserve generated character identity/colors.
+    plans = {
+        "space":      {"contrast":1.028, "saturation":1.040, "gamma":0.995, "brightness":0.002},
+        "nature":     {"contrast":1.018, "saturation":1.045, "gamma":1.008, "brightness":0.004},
+        "weather":    {"contrast":1.018, "saturation":1.035, "gamma":1.006, "brightness":0.004},
+        "colors":     {"contrast":1.012, "saturation":1.050, "gamma":1.000, "brightness":0.002},
+        "emotions":   {"contrast":1.010, "saturation":1.025, "gamma":1.012, "brightness":0.004},
+        "body":       {"contrast":1.015, "saturation":1.020, "gamma":1.008, "brightness":0.003},
+        "safety":     {"contrast":1.025, "saturation":1.025, "gamma":1.000, "brightness":0.001},
+        "science":    {"contrast":1.024, "saturation":1.032, "gamma":1.000, "brightness":0.002},
+    }
+    return plans.get(c, {"contrast":1.018, "saturation":1.028, "gamma":1.004, "brightness":0.003})
+
+
+def build_transition_plan(edit_plan):
+    style = edit_plan.get("style") or "CLEAN_DISCOVERY"
+    if style == "PLAYFUL_QUIZ":
+        return {"intro_xfade":0.16, "closure_xfade":0.22}
+    if style == "CALM_LEARNING":
+        return {"intro_xfade":0.24, "closure_xfade":0.32}
+    if style == "COUNT_AND_PLAY":
+        return {"intro_xfade":0.18, "closure_xfade":0.24}
+    if style == "STORY_MODE":
+        return {"intro_xfade":0.18, "closure_xfade":0.28}
+    return {"intro_xfade":0.20, "closure_xfade":0.26}
+
+
+def build_paced_video_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:v:0]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f}[pacedv];"
+    parts = []
+    labels = []
+    for i, seg in enumerate(segs):
+        label = f"pv{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:v:0]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"setpts=(PTS-STARTPTS)/{seg['speed']:.6f},settb=AVTB[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=1:a=0[pacedv];")
+    return "".join(parts)
+
+
+def build_paced_audio_prefix(pacing_plan):
+    segs = pacing_plan.get("segments") or []
+    if not segs:
+        return f"[0:a]atempo={SHORT_PLAYBACK_SPEED:.5f}[paceda];"
+    parts = []
+    labels = []
+    for i, seg in enumerate(segs):
+        label = f"pa{i}"
+        labels.append(f"[{label}]")
+        parts.append(
+            f"[0:a]atrim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"asetpts=PTS-STARTPTS,atempo={seg['speed']:.6f}[{label}];"
+        )
+    parts.append("".join(labels) + f"concat=n={len(segs)}:v=0:a=1[paceda];")
+    return "".join(parts)
+
+
+def build_camera_filter(chain_in, chain_out, mode, timing):
+    if mode == "STATIC":
+        return f"[{chain_in}]null[{chain_out}];"
+
+    if mode == "GENTLE_PUSH":
+        scale = "1+0.016*min(max(t/13,0),1)"
+    else:
+        r = timing["reveal"]
+        start = max(0.0, r - 0.34)
+        end = r + 0.78
+        span = max(end - start, 0.2)
+        scale = (
+            f"if(between(t,{start:.3f},{end:.3f}),"
+            f"1+0.026*sin(PI*(t-{start:.3f})/{span:.3f}),1)"
+        )
+    return (
+        f"[{chain_in}]scale=w='{OUTPUT_W}*({scale})':h='{OUTPUT_H}*({scale})':eval=frame[camz];"
+        f"[camz]crop={OUTPUT_W}:{OUTPUT_H}:(iw-{OUTPUT_W})/2:(ih-{OUTPUT_H})/2[{chain_out}];"
+    )
+
+
+def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme, pacing_plan, color_plan, motion_plan, motion_graphics_plan):
+    parts = [build_paced_video_prefix(pacing_plan)]
+
+    eq_base = (
+        f"eq=contrast={color_plan['contrast']:.3f}:saturation={color_plan['saturation']:.3f}:"
+        f"gamma={color_plan['gamma']:.3f}:brightness={color_plan['brightness']:.3f}"
+    )
+
+    if is_near_vertical_9_16(info["width"], info["height"]):
+        parts.append(
+            f"[pacedv]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},setsar=1,{eq_base},"
+            "unsharp=5:5:0.20:5:5:0.0[base];"
+        )
+    else:
+        parts.append("[pacedv]split=2[bg][fg];")
+        parts.append(
+            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=28,eq=brightness=-0.04:saturation=0.92[bg2];"
+        )
+        parts.append(
+            f"[fg]scale={OUTPUT_W-80}:{OUTPUT_H-142}:force_original_aspect_ratio=decrease,"
+            f"setsar=1,{eq_base}[fg2];"
+        )
+        parts.append("[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base];")
+
+    # Gentle reveal color lift: a real editorial emphasis, not a glow/sticker effect.
+    reveal_st = max(0.0, timing["reveal"] - 0.12)
+    reveal_en = min(duration, timing["reveal"] + 0.70)
+    if edit_plan["style"] != "CALM_LEARNING":
+        parts.append(
+            f"[base]eq=contrast=1.010:saturation=1.040:brightness=0.006:"
+            f"enable='between(t,{reveal_st:.3f},{reveal_en:.3f})'[emph];"
+        )
+        base_label = "emph"
+    else:
+        base_label = "base"
+
+    parts.append(
+        f"[{base_label}]fade=t=in:st=0:d=0.10,"
+        f"fade=t=out:st={timing['fade_out_start']:.3f}:d=0.20,fps={OUTPUT_FPS}[clean];"
+    )
+    parts.append(build_camera_filter("clean", "cam", edit_plan["camera_mode"], timing))
+
+    chain = "cam"
+    idx = 0
+    def step(filter_text):
+        nonlocal chain, idx
+        nxt = f"v{idx}"
+        parts.append(f"[{chain}]{filter_text}[{nxt}];")
+        chain = nxt
+        idx += 1
+
+    # Contextual motion graphics: one short cue at most, centered on the reveal.
+    mg = motion_graphics_plan or {"type":"none"}
+    mg_type = mg.get("type", "none")
+    mg_st = max(0.0, timing["reveal"] - 0.05)
+    mg_en = min(duration, mg_st + float(mg.get("duration", MOTION_GRAPHICS_DURATION)))
+    grow = f"min(max((t-{mg_st:.3f})/{max(float(mg.get('entrance', MOTION_GRAPHICS_ENTRANCE)),0.05):.3f},0),1)"
+    accent = mg.get("accent") or theme["accent"]
+
+    if mg_type == "focus_brackets":
+        # Four restrained corner brackets frame the central teaching zone without covering it.
+        x0, y0, bw, bh, arm, thick = 236, 430, 608, 760, 78, 5
+        alpha = 0.46
+        # top-left
+        step(f"drawbox=x={x0}:y={y0}:w='{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0}:y={y0}:w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        # top-right
+        step(f"drawbox=x={x0+bw}:y={y0}:w='-{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw-thick}:y={y0}:w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        # bottom-left / bottom-right
+        step(f"drawbox=x={x0}:y={y0+bh}:w='{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0}:y='{y0+bh}-{arm}*{grow}':w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw}:y={y0+bh}:w='-{arm}*{grow}':h={thick}:color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+        step(f"drawbox=x={x0+bw-thick}:y='{y0+bh}-{arm}*{grow}':w={thick}:h='{arm}*{grow}':color={accent}@{alpha}:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'")
+
+    elif mg_type == "direction_arrow":
+        arrow = "↔" if "left-right" in str(payload.get("lesson_key") or "") else "→"
+        ax = motion_slide_x(str(SAFE_LEFT + 8), mg_st, offset=-65, dur=0.24)
+        ay = OUTPUT_H - SAFE_BOTTOM - 210
+        step(
+            f"drawtext=fontfile={FONT}:text='{esc(arrow)}':fontcolor={accent}@0.78:fontsize=88:"
+            f"shadowx=2:shadowy=2:shadowcolor=black@0.22:x='{ax}':y={ay}:"
+            f"alpha='{fade_alpha(mg_st,mg_en,0.12)}'"
+        )
+
+    elif mg_type == "shape_badge" and mg.get("shape_symbol"):
+        symbol = esc(mg["shape_symbol"])
+        sy = motion_pop_y(OUTPUT_H - SAFE_BOTTOM - 220, mg_st, amp=16, dur=0.34)
+        step(
+            f"drawtext=fontfile={FONT}:text='{symbol}':fontcolor={accent}@0.82:fontsize=104:"
+            f"shadowx=2:shadowy=2:shadowcolor=black@0.20:x={SAFE_LEFT+16}:y='{sy}':"
+            f"alpha='{fade_alpha(mg_st,mg_en,0.14)}'"
+        )
+
+    elif mg_type == "color_sweep":
+        full_w = OUTPUT_W - SAFE_LEFT - SAFE_RIGHT
+        yy = OUTPUT_H - SAFE_BOTTOM - 54
+        step(
+            f"drawbox=x={SAFE_LEFT}:y={yy}:w='{full_w}*{grow}':h=12:"
+            f"color={accent}@0.62:t=fill:enable='between(t,{mg_st:.3f},{mg_en:.3f})'"
+        )
+
+    elif mg_type == "scan_line":
+        scan_span = max(mg_en - mg_st, 0.25)
+        yy = f"520+650*min(max((t-{mg_st:.3f})/{scan_span:.3f},0),1)"
+        step(
+            f"drawbox=x=175:y='{yy}':w=730:h=4:color={accent}@0.36:t=fill:"
+            f"enable='between(t,{mg_st:.3f},{mg_en:.3f})'"
+        )
+
+    if edit_plan["show_brand"]:
+        step(f"drawbox=x={SAFE_LEFT}:y={SAFE_TOP}:w=176:h=48:color=black@0.20:t=fill")
+        step(
+            f"drawtext=fontfile={FONT}:text='KP KIDS':fontcolor=white@0.86:fontsize=25:"
+            f"shadowx=1:shadowy=1:shadowcolor=black@0.32:x={SAFE_LEFT+20}:y={SAFE_TOP+10}"
+        )
+
+    opening_text = ""
+    if edit_plan["opening"] == "topic":
+        opening_text = texts["topic"]
+    elif edit_plan["opening"] == "category":
+        opening_text = texts["category"]
+
+    # V7.8 STRONG KINETIC OPENING TITLE:
+    # Bigger card + text, near-simultaneous entrance, real overshoot, then a long still hold.
+    if opening_text:
+        st, en = timing["opening_start"], timing["opening_end"]
+        box_w = min(900, max(520, 38 * len(opening_text) + 170))
+        box_h = 132
+        center_x = OUTPUT_W / 2
+        base_y = SAFE_TOP + 155
+        motion = motion_plan.get("opening_motion", "magic_wipe")
+        start_scale = 0.58 if motion in {"bubble_pop", "magic_wipe"} else 0.66
+        panel_w = kinetic_panel_width(box_w, st, en, start_scale=start_scale)
+        panel_x = kinetic_panel_x(center_x, box_w, st, en, start_scale=start_scale)
+
+        # V8.3 CLEAN GLOW: no rectangle/card behind the title.
+        text_start = st + 0.08
+        base_font = 62 if len(opening_text) <= 18 else 56
+        font_expr = kinetic_fontsize_expr(base_font, text_start, dur=0.44, start_scale=0.86, overshoot=1.065)
+        text_x = "(w-text_w)/2"
+        text_y = str(base_y + 31)
+        if motion == "speed_slide_left":
+            text_x = motion_slide_x("(w-text_w)/2", text_start, offset=-132, dur=0.42)
+        elif motion == "speed_slide_right":
+            text_x = motion_slide_x("(w-text_w)/2", text_start, offset=132, dur=0.42)
+        elif motion == "bubble_pop":
+            text_y = motion_pop_y(base_y + 31, text_start, amp=18, dur=0.44)
+        else:
+            text_y = motion_rise_y(base_y + 31, text_start, pixels=18, dur=0.42)
+
+        # Stronger but very short after-image trail during entrance only.
+        if motion in {"speed_slide_left", "speed_slide_right"}:
+            trail_dir = -1 if motion == "speed_slide_left" else 1
+            step(
+                f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize={base_font}:"
+                f"borderw=2:bordercolor={theme['accent']}@0.28:x='(w-text_w)/2+{trail_dir*58}':y={base_y+31}:"
+                f"alpha='{ghost_alpha(text_start, 0.24, 0.18)}'"
+            )
+            step(
+                f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize={base_font}:"
+                f"borderw=2:bordercolor={theme['accent']}@0.28:x='(w-text_w)/2+{trail_dir*28}':y={base_y+31}:"
+                f"alpha='{ghost_alpha(text_start+0.04, 0.24, 0.23)}'"
+            )
+
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor={theme['accent']}@0.18:"
+            f"fontsize='{font_expr}':borderw=9:bordercolor={theme['accent']}@0.16:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor={theme['accent']}@0.15:"
+            f"fontsize='{font_expr}':borderw=15:bordercolor={theme['accent']}@0.12:"
+            f"x='{text_x}':y='{text_y}':alpha='{entrance_only_alpha(text_start,0.52,0.82)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(opening_text)}':fontcolor=white:fontsize='{font_expr}':"
+            f"borderw=2:bordercolor={theme['accent']}@0.92:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
+        )
+
+    # V7.8 STRONG KINETIC KEYWORD / ANSWER:
+    # Large impact card, 85% -> 108% -> 100% text scale, short trail, then 3s readable hold.
+    if edit_plan["show_keyword"] and texts["keyword"]:
+        st, en = timing["keyword_start"], timing["keyword_end"]
+        kw = texts["keyword"]
+        box_w = min(930, max(600, 58 * len(kw) + 220))
+        box_h = 154
+        center_x = OUTPUT_W / 2
+        # Reuse a high safe band at reveal time; without object tracking this avoids
+        # covering the teaching target/face in the center of the generated scene.
+        base_y = SAFE_TOP + 92
+        motion = motion_plan.get("keyword_motion", "magic_wipe")
+        start_scale = 0.56 if motion == "bubble_pop" else 0.64
+        panel_w = kinetic_panel_width(box_w, st, en, start_scale=start_scale)
+        panel_x = kinetic_panel_x(center_x, box_w, st, en, start_scale=start_scale)
+
+        # V8.3 answer reveal: no panel, just clean glow typography.
+        text_start = st + 0.06
+        base_font = 82 if len(kw) <= 10 else (74 if len(kw) <= 14 else 66)
+        font_expr = kinetic_fontsize_expr(base_font, text_start, dur=0.46, start_scale=0.85, overshoot=1.08)
+        text_x = "(w-text_w)/2"
+        if motion == "bubble_pop":
+            text_y = motion_pop_y(base_y + 35, text_start, amp=20, dur=0.46)
+        else:
+            text_y = motion_rise_y(base_y + 35, text_start, pixels=17, dur=0.43)
+
+        # Two short after-images create an intentional kinetic impact, disappearing before reading begins.
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize={base_font}:"
+            f"borderw=3:bordercolor={theme['accent']}@0.30:x='(w-text_w)/2+30':y={base_y+38}:"
+            f"alpha='{ghost_alpha(text_start,0.24,0.18)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize={base_font}:"
+            f"borderw=3:bordercolor={theme['accent']}@0.30:x='(w-text_w)/2+14':y={base_y+36}:"
+            f"alpha='{ghost_alpha(text_start+0.035,0.24,0.24)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor={theme['accent']}@0.20:"
+            f"fontsize='{font_expr}':borderw=11:bordercolor={theme['accent']}@0.18:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor={theme['accent']}@0.18:"
+            f"fontsize='{font_expr}':borderw=17:bordercolor={theme['accent']}@0.14:"
+            f"x='{text_x}':y='{text_y}':alpha='{entrance_only_alpha(text_start,0.56,0.90)}'"
+        )
+        step(
+            f"drawtext=fontfile={FONT_ITALIC}:text='{esc(kw)}':fontcolor=white:fontsize='{font_expr}':"
+            f"borderw=2:bordercolor={theme['accent']}@0.98:"
+            f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
+        )
+
+    if edit_plan["use_progress"]:
+        py = OUTPUT_H - SAFE_BOTTOM
+        step(f"drawbox=x={SAFE_LEFT}:y={py}:w=780:h=8:color=black@0.16:t=fill")
+        progress = f"(780*min(t/{max(duration,0.1):.3f},1))"
+        step(f"drawbox=x={SAFE_LEFT}:y={py}:w='{progress}':h=8:color={theme['accent']}@0.68:t=fill")
+
+    parts.append(f"[{chain}]format=yuv420p[vout]")
+    return "".join(parts)
+
+
+def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan, motion_graphics_plan):
+    parts = []
+    if info["has_audio"]:
+        parts.append(build_paced_audio_prefix(pacing_plan))
+        speech_expr = speech_enable_expr(speech_windows)
+        dialogue_focus = ""
+        if speech_expr:
+            # Conservative mid/side focus during speech. In a mixed track this cannot isolate music,
+            # but it gently favors centered dialogue and reduces wide background energy.
+            dialogue_focus = f",stereotools=slev=0.88:mlev=1.045:enable='{speech_expr}'"
+        parts.append(
+            "[paceda]aformat=sample_rates=48000:channel_layouts=stereo,"
+            "highpass=f=70,lowpass=f=15500,"
+            "acompressor=threshold=-20dB:ratio=1.75:attack=15:release=180:makeup=1.0"
+            f"{dialogue_focus},"
+            f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},"
+            "alimiter=limit=0.94,"
+            "afade=t=in:st=0:d=0.08,"
+            f"afade=t=out:st={max(0.0,duration-0.18):.3f}:d=0.18[amain];"
+        )
+    else:
+        parts.append(f"anullsrc=r=48000:cl=stereo:d={duration:.3f},asetpts=PTS-STARTPTS[amain];")
+
+    cue_labels = []
+
+    def add_text_cue(kind, when, prefix):
+        if not kind or kind == "none":
+            return
+        delay = int(max(0.0, when) * 1000)
+        label = f"{prefix}sfx"
+
+        if kind in {"soft_whoosh", "motion_whoosh", "kid_whoosh"}:
+            # Airy child-friendly sweep + tiny bright tail, synced to card entrance.
+            nlab = f"{prefix}noise"
+            tlab = f"{prefix}tone"
+            parts.append(
+                "anoisesrc=color=white:sample_rate=48000:duration=0.25,"
+                "highpass=f=520,lowpass=f=4300,"
+                "afade=t=in:st=0:d=0.012,afade=t=out:st=0.105:d=0.135,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0550):.4f},adelay={delay}|{delay}[{nlab}];"
+            )
+            parts.append(
+                "sine=frequency=880:sample_rate=48000:duration=0.14,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.055:d=0.075,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0280):.4f},adelay={delay+115}|{delay+115}[{tlab}];"
+            )
+            parts.append(f"[{nlab}][{tlab}]amix=inputs=2:normalize=0:duration=longest[{label}];")
+
+        elif kind in {"motion_hit", "kid_reward"}:
+            # Rounded pop + two-note sparkle. Fun, readable, and softer than game-UI SFX.
+            plab = f"{prefix}pop"
+            dlab = f"{prefix}ding"
+            d2lab = f"{prefix}ding2"
+            parts.append(
+                "sine=frequency=470:sample_rate=48000:duration=0.115,"
+                "afade=t=in:st=0:d=0.006,afade=t=out:st=0.040:d=0.070,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0620):.4f},adelay={delay}|{delay}[{plab}];"
+            )
+            parts.append(
+                "sine=frequency=1046:sample_rate=48000:duration=0.14,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.055:d=0.080,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0360):.4f},adelay={delay+50}|{delay+50}[{dlab}];"
+            )
+            parts.append(
+                "sine=frequency=1318:sample_rate=48000:duration=0.12,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.050:d=0.065,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0260):.4f},adelay={delay+125}|{delay+125}[{d2lab}];"
+            )
+            parts.append(f"[{plab}][{dlab}][{d2lab}]amix=inputs=3:normalize=0:duration=longest[{label}];")
+
+        elif kind == "soft_pop":
+            parts.append(
+                "sine=frequency=540:sample_rate=48000:duration=0.095,"
+                "afade=t=in:st=0:d=0.008,afade=t=out:st=0.038:d=0.052,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0400):.4f},adelay={delay}|{delay}[{label}];"
+            )
+        else:  # soft_ding
+            parts.append(
+                "sine=frequency=1175:sample_rate=48000:duration=0.14,"
+                "afade=t=in:st=0:d=0.010,afade=t=out:st=0.055:d=0.075,"
+                f"volume={min(TEXT_SFX_MAX_GAIN,0.0300):.4f},adelay={delay}|{delay}[{label}];"
+            )
+        cue_labels.append(f"[{label}]")
+
+    # The cue is synchronized to the first visible frame of the text motion.
+    if edit_plan.get("opening") != "none":
+        add_text_cue(motion_plan.get("opening_sfx"), timing["opening_start"], "open")
+    if edit_plan.get("show_keyword"):
+        add_text_cue(motion_plan.get("keyword_sfx"), timing["keyword_start"], "kw")
+
+    # Motion graphics share the reveal sound whenever typography already owns it.
+    # A separate tiny whoosh is allowed only when no keyword SFX is present.
+    mg_sfx = (motion_graphics_plan or {}).get("sfx", "none")
+    if mg_sfx != "none" and motion_plan.get("keyword_sfx", "none") == "none":
+        add_text_cue("soft_whoosh", timing["reveal"], "mg")
+
+    if cue_labels:
+        if len(cue_labels) == 1:
+            parts.append(f"{cue_labels[0]}anull[textsfx];")
+        else:
+            parts.append("".join(cue_labels) + f"amix=inputs={len(cue_labels)}:normalize=0:duration=longest[textsfx];")
+
+        # V7.8: give the text impact a tiny, editor-like pocket in the original mix.
+        # This is only 160-230 ms, so dialogue remains natural while the cue is actually audible.
+        duck_expr = "1"
+        if edit_plan.get("opening") != "none":
+            ost = timing["opening_start"]
+            duck_expr = f"if(between(t,{ost:.3f},{ost+0.170:.3f}),0.84,{duck_expr})"
+        if edit_plan.get("show_keyword"):
+            kst = timing["keyword_start"]
+            duck_expr = f"if(between(t,{kst:.3f},{kst+0.230:.3f}),0.74,{duck_expr})"
+
+        parts.append("[amain]asplit=2[amainraw][side];")
+        parts.append(f"[amainraw]volume='{duck_expr}':eval=frame[amainmix];")
+        # Still protect speech, but do not crush the cue the way V7.7 did.
+        parts.append(
+            "[textsfx][side]sidechaincompress=threshold=0.065:ratio=3.5:attack=2:release=75:mix=0.72[textsfxduck];"
+        )
+        parts.append("[amainmix][textsfxduck]amix=inputs=2:normalize=0:duration=first[aout]")
+    else:
+        parts.append("[amain]anull[aout]")
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# GUARANTEED ORIGINAL BACKGROUND MUSIC
+# ---------------------------------------------------------------------------
+# The generator below creates a small original instrumental bed locally. It uses
+# only synthesized tones/noise, so the editor never depends on Grok deciding to
+# create music and never needs a third-party/copyrighted music file.
+
+def _music_profile(payload):
+    mode = str(payload.get("content_mode") or "education").strip().lower()
+    category = str(payload.get("category") or "").strip().lower()
+    style = str(payload.get("music_style") or "").strip().lower()
+    text = f"{mode} {category} {style}"
+
+    # Procedural fallback levels are intentionally audible, but speech stays dominant.
+    if mode == "entertainment" or any(k in text for k in ["dance", "bouncy", "clap", "toy-drum", "rhythm"]):
+        return {"name":"playful_dance", "tempo":124, "root":293.66, "gain":0.215, "duck_gain":0.135, "swing":0.035, "percussion":1.0}
+    if any(k in text for k in ["calm", "sleep", "night", "gentle", "mindful"]):
+        return {"name":"calm_warm", "tempo":88, "root":261.63, "gain":0.155, "duck_gain":0.098, "swing":0.0, "percussion":0.28}
+    if any(k in text for k in ["mystery", "guess", "space"]):
+        return {"name":"curious_space", "tempo":104, "root":293.66, "gain":0.175, "duck_gain":0.108, "swing":0.018, "percussion":0.50}
+    if any(k in text for k in ["nature", "weather", "ukulele", "acoustic"]):
+        return {"name":"sunny_plucks", "tempo":108, "root":261.63, "gain":0.182, "duck_gain":0.112, "swing":0.018, "percussion":0.44}
+    return {"name":"learning_plucks", "tempo":106, "root":261.63, "gain":0.182, "duck_gain":0.112, "swing":0.015, "percussion":0.42}
+
+
+
+# User-provided real music library. The editor prefers these tracks when present,
+# automatically finds a strong short section, then falls back to the original
+# procedural synth if the library is missing or unreadable.
+MUSIC_TRACK_GROUPS = {
     "playful_dance": [
         "Bunny Hop - Quincas Moreira.mp3",
         "Little Samba - Quincas Moreira.mp3",
@@ -94,1101 +1603,716 @@ MUSIC_PROFILES = {
 }
 
 
-def run(cmd):
-    print("+", " ".join(str(x) for x in cmd), flush=True)
-    subprocess.run(cmd, check=True)
+def find_music_library(payload):
+    """Find a repo/local music folder containing MP3 files."""
+    script_dir = Path(__file__).resolve().parent
+    candidates = []
+    if payload.get("music_library_dir"):
+        candidates.append(Path(str(payload.get("music_library_dir"))).expanduser())
+    if os.environ.get("KP_KIDS_MUSIC_DIR"):
+        candidates.append(Path(os.environ["KP_KIDS_MUSIC_DIR"]).expanduser())
+    candidates += [
+        script_dir / "music",
+        script_dir / "MP3",
+        Path.cwd() / "music",
+        Path.cwd() / "MP3",
+    ]
+    seen = set()
+    for d in candidates:
+        try:
+            d = d.resolve()
+        except Exception:
+            pass
+        key = str(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        if d.is_dir() and any(d.glob("*.mp3")):
+            return d
+    return None
 
 
-def capture(cmd):
-    return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True).strip()
+def _music_seed(payload, extra=""):
+    seed_text = "|".join(str(payload.get(k, "")) for k in [
+        "short_id", "lesson_key", "topic", "category", "content_mode", "music_style"
+    ]) + "|" + str(extra)
+    return int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:16], 16)
 
 
-def ffprobe_duration(path):
+def choose_library_track(library_dir, payload, profile):
+    """Choose a deterministic-but-varied track suitable for the episode profile."""
+    available = {p.name.lower(): p for p in library_dir.glob("*.mp3") if p.is_file()}
+    preferred = MUSIC_TRACK_GROUPS.get(profile["name"], MUSIC_TRACK_GROUPS["learning_plucks"])
+    pool = [available[n.lower()] for n in preferred if n.lower() in available]
+    if not pool:
+        pool = sorted(available.values(), key=lambda p: p.name.lower())
+    if not pool:
+        return None
+    rng = random.Random(_music_seed(payload, profile["name"]))
+    return pool[rng.randrange(len(pool))]
+
+
+def _audio_duration(path):
     try:
-        return float(capture([
+        out = subprocess.check_output([
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(path)
-        ]))
+        ], text=True).strip()
+        return max(0.0, float(out))
     except Exception:
         return 0.0
 
 
-
-def ffprobe_dimensions(path):
-    out = capture([
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=s=x:p=0", str(path)
-    ])
-    try:
-        w, h = out.split("x", 1)
-        return int(w), int(h)
-    except Exception:
-        raise RuntimeError(f"Could not read video dimensions for {path}")
-
-
-def assert_landscape_brand_clip(path, label):
-    w, h = ffprobe_dimensions(path)
-    ratio = (w / h) if h else 0.0
-    print(f"{label}: source dimensions {w}x{h} ratio={ratio:.3f}", flush=True)
-    if w <= h or ratio < 1.30:
-        raise RuntimeError(
-            f"{label} is NOT landscape ({w}x{h}). "
-            "Refusing to use a Shorts/vertical branding clip in the Long video."
-        )
-    return w, h
-
-
-def payload_bool(payload, key, default=False):
-    v = payload.get(key, default)
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    return str(v).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def has_audio(path):
-    try:
-        out = capture([
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=index", "-of", "csv=p=0", str(path)
-        ])
-        return bool(out.strip())
-    except Exception:
-        return False
-
-
-def looks_like_media(path):
-    try:
-        return Path(path).stat().st_size > 40_000
-    except Exception:
-        return False
-
-
-def download(url, dest, label="media"):
-    req = urllib.request.Request(url, headers={"User-Agent": "KP-Kids-Long-Editor/1.0"})
-    with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
-        while True:
-            chunk = r.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-    if not looks_like_media(dest):
-        raise RuntimeError(f"{label}: downloaded file is too small/invalid")
-
-
-def download_via_n8n_proxy(base_url, token, file_id, dest, label="Drive proxy media"):
-    base_url = str(base_url or "").strip()
-    token = str(token or "").strip()
-    file_id = str(file_id or "").strip()
-    if not base_url or not token or not file_id:
-        raise RuntimeError(f"{label}: missing proxy configuration")
-    sep = "&" if "?" in base_url else "?"
-    url = base_url + sep + urllib.parse.urlencode({"file_id": file_id, "token": token})
-    download(url, dest, label=label)
-
-
-def download_google_drive_file(file_id, dest, label="Google Drive media"):
-    """Public Google Drive downloader with confirmation-page handling."""
-    cj = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    opener.addheaders = [("User-Agent", "Mozilla/5.0 KP-Kids-Long-Editor/1.0"), ("Accept", "*/*")]
-    endpoints = [
-        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
-        f"https://drive.usercontent.google.com/download?id={file_id}&export=download",
-        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
-        f"https://drive.google.com/uc?export=download&id={file_id}",
-    ]
-
-    def fetch(url):
-        req = urllib.request.Request(url)
-        with opener.open(req, timeout=180) as r:
-            return r.read(), (r.headers.get("Content-Type") or "").lower(), r.geturl()
-
-    last = None
-    for url in endpoints:
-        for attempt in range(3):
-            try:
-                data, ctype, final_url = fetch(url)
-                if "text/html" not in ctype and len(data) > 40_000:
-                    Path(dest).write_bytes(data)
-                    print(f"{label}: downloaded from Google Drive", flush=True)
-                    return
-                text = data.decode("utf-8", "ignore")
-                candidates = []
-                for m in re.finditer(r'href="([^"]*?/uc\?export=download[^"]+)"', text):
-                    u = html.unescape(m.group(1)).replace("\\/", "/")
-                    if u.startswith("/"):
-                        u = urllib.parse.urljoin(final_url, u)
-                    candidates.append(u)
-                token = re.search(r'confirm=([0-9A-Za-z_-]+)', text)
-                if token:
-                    candidates.append(
-                        "https://drive.usercontent.google.com/download?" +
-                        urllib.parse.urlencode({"id": file_id, "export": "download", "confirm": token.group(1)})
-                    )
-                for c in candidates:
-                    d2, ct2, _ = fetch(c)
-                    if "text/html" not in ct2 and len(d2) > 40_000:
-                        Path(dest).write_bytes(d2)
-                        print(f"{label}: downloaded after confirmation", flush=True)
-                        return
-                last = RuntimeError(f"{label}: Google Drive returned HTML instead of media")
-            except Exception as e:
-                last = e
-                if attempt < 2:
-                    time.sleep(2 + attempt * 3)
-        # next endpoint
-    raise RuntimeError(f"{label}: failed to download Google Drive file {file_id}: {last}")
-
-
-def sanitize_text(s):
-    return str(s or "").replace("\n", " ").strip()
-
-
-
-
-def detect_silence_intervals(path, duration):
-    if not has_audio(path) or duration <= 0:
+def _decode_energy_seconds(track_path, sample_rate=4000):
+    """Decode very-low-rate mono PCM and return one RMS/activity feature per second."""
+    p = subprocess.run([
+        "ffmpeg", "-v", "error", "-i", str(track_path), "-vn", "-ac", "1",
+        "-ar", str(sample_rate), "-f", "s16le", "pipe:1"
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    pcm = array.array("h")
+    pcm.frombytes(p.stdout)
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    if not pcm:
         return []
-    cmd = [
-        "ffmpeg", "-hide_banner", "-nostats", "-t", f"{duration:.3f}", "-i", str(path),
-        "-af", f"silencedetect=noise={LONG_SILENCE_DB}dB:d={LONG_SILENCE_MIN_DURATION}",
-        "-f", "null", "-"
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
-    starts = [float(x) for x in re.findall(r"silence_start:\s*([0-9.]+)", text)]
-    ends = [float(x) for x in re.findall(r"silence_end:\s*([0-9.]+)", text)]
-    intervals = []
-    for i, st in enumerate(starts):
-        en = ends[i] if i < len(ends) else duration
-        st = max(0.0, min(st, duration))
-        en = max(st, min(en, duration))
-        if en - st >= LONG_SILENCE_MIN_DURATION - 0.01:
-            intervals.append((st, en))
-    merged = []
-    for st, en in sorted(intervals):
-        if merged and st <= merged[-1][1] + 0.03:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], en))
-        else:
-            merged.append((st, en))
-    return merged
-
-
-def pause_speed(length):
-    if length >= 0.85:
-        return LONG_LONG_PAUSE_SPEED
-    if length >= 0.45:
-        return LONG_MEDIUM_PAUSE_SPEED
-    return LONG_SHORT_PAUSE_SPEED
-
-
-def build_pacing_plan(duration, silence_intervals):
-    if duration <= 0:
-        return {"segments": [], "output_duration": 0.0, "target_duration": 0.0, "silence_count": 0}
-
-    marks = {0.0, duration}
-    for st, en in silence_intervals:
-        marks.add(max(0.0, min(st, duration)))
-        marks.add(max(0.0, min(en, duration)))
-    marks = sorted(marks)
-
-    raw = []
-    for a, b in zip(marks, marks[1:]):
-        if b - a < LONG_MIN_PACING_SEGMENT:
+    feats = []
+    step = sample_rate
+    for start in range(0, len(pcm), step):
+        chunk = pcm[start:start+step]
+        if not chunk:
             continue
-        mid = (a + b) / 2.0
-        is_silence = any(st <= mid <= en for st, en in silence_intervals)
-        raw.append({
-            "source_start": a,
-            "source_end": b,
-            "kind": "silence" if is_silence else "speech",
-            "speed": pause_speed(b-a) if is_silence else LONG_SPEECH_SPEED,
-        })
-
-    if not raw:
-        raw = [{
-            "source_start": 0.0,
-            "source_end": duration,
-            "kind": "speech",
-            "speed": LONG_BODY_TARGET_SPEED,
-        }]
-
-    target_duration = duration / LONG_BODY_TARGET_SPEED
-    current = sum((x["source_end"] - x["source_start"]) / x["speed"] for x in raw)
-    factor = current / target_duration if target_duration > 0 else 1.0
-
-    for x in raw:
-        x["speed"] = min(1.0, max(0.86, x["speed"] * factor))
-
-    out_t = 0.0
-    segments = []
-    for x in raw:
-        seg = dict(x)
-        seg["output_start"] = out_t
-        seg_dur = (seg["source_end"] - seg["source_start"]) / seg["speed"]
-        out_t += seg_dur
-        seg["output_end"] = out_t
-        segments.append(seg)
-
-    return {
-        "segments": segments,
-        "output_duration": out_t,
-        "target_duration": target_duration,
-        "silence_count": len(silence_intervals),
-    }
+        # RMS = perceived energy proxy; activity rewards sections with rhythmic movement.
+        sq = 0.0
+        diff = 0.0
+        prev = float(chunk[0])
+        peak = 0.0
+        for x in chunk:
+            fx = float(x)
+            sq += fx * fx
+            ax = abs(fx)
+            if ax > peak:
+                peak = ax
+            diff += abs(fx - prev)
+            prev = fx
+        n = max(1, len(chunk))
+        rms = math.sqrt(sq / n) / 32768.0
+        activity = (diff / n) / 32768.0
+        feats.append((rms, activity, peak / 32768.0))
+    return feats
 
 
-def map_source_time_to_output(seconds, pacing_plan):
+def choose_engaging_segment(track_path, needed_duration, payload, profile):
+    """Pick a short, energetic section instead of always using the beginning of a long track."""
+    track_duration = _audio_duration(track_path)
+    needed = max(1.0, float(needed_duration))
+    if track_duration <= needed + 1.0:
+        return {
+            "start": 0.0, "duration": min(needed, max(track_duration, needed)),
+            "track_duration": track_duration, "score": 0.0, "method": "whole-track"
+        }
+
+    # Keep away from intros/outros when the track is long enough.
+    head_margin = 7.0 if track_duration > needed + 24 else 1.0
+    tail_margin = 8.0 if track_duration > needed + 24 else 1.0
+    latest = max(head_margin, track_duration - needed - tail_margin)
+
     try:
-        t = max(0.0, float(seconds))
-    except Exception:
-        return None
-    segs = pacing_plan.get("segments") or []
-    if not segs:
-        return t / LONG_BODY_TARGET_SPEED
-    for seg in segs:
-        if t <= seg["source_end"] + 1e-6:
-            local = max(0.0, t - seg["source_start"])
-            return seg["output_start"] + local / seg["speed"]
-    return pacing_plan.get("output_duration", t / LONG_BODY_TARGET_SPEED)
-
-
-def build_paced_video_prefix(pacing_plan):
-    segs = pacing_plan.get("segments") or []
-    if not segs:
-        return f"[0:v]setpts=PTS/{LONG_BODY_TARGET_SPEED:.5f}[pacedv];"
-    parts, labels = [], []
-    for i, seg in enumerate(segs):
-        label = f"pv{i}"
-        labels.append(f"[{label}]")
-        parts.append(
-            f"[0:v]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
-            f"setpts=(PTS-STARTPTS)/{seg['speed']:.6f},settb=AVTB[{label}];"
-        )
-    parts.append("".join(labels) + f"concat=n={len(segs)}:v=1:a=0[pacedv];")
-    return "".join(parts)
-
-
-def build_paced_audio_prefix(pacing_plan):
-    segs = pacing_plan.get("segments") or []
-    if not segs:
-        return f"[0:a]atempo={LONG_BODY_TARGET_SPEED:.5f}[paceda];"
-    parts, labels = [], []
-    for i, seg in enumerate(segs):
-        label = f"pa{i}"
-        labels.append(f"[{label}]")
-        parts.append(
-            f"[0:a]atrim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
-            f"asetpts=PTS-STARTPTS,atempo={seg['speed']:.6f}[{label}];"
-        )
-    parts.append("".join(labels) + f"concat=n={len(segs)}:v=0:a=1[paceda];")
-    return "".join(parts)
-
-
-def create_paced_clip(src, dest, pacing_plan):
-    """Apply the variable pacing to video AND original audio before landscape composition."""
-    audio = has_audio(src)
-    fc = build_paced_video_prefix(pacing_plan)
-
-    cmd = ["ffmpeg", "-y", "-i", str(src)]
-    if audio:
-        fc += build_paced_audio_prefix(pacing_plan)
-        fc += (
-            f"[pacedv]fps={OUTPUT_FPS},format=yuv420p[v];"
-            f"[paceda]aresample={AUDIO_RATE},aformat=channel_layouts=stereo[a]"
-        )
-        cmd += [
-            "-filter_complex", fc,
-            "-map", "[v]", "-map", "[a]",
-        ]
-    else:
-        dur = pacing_plan.get("output_duration") or max(0.5, ffprobe_duration(src) / LONG_BODY_TARGET_SPEED)
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
-        fc += f"[pacedv]fps={OUTPUT_FPS},format=yuv420p[v]"
-        cmd += [
-            "-filter_complex", fc,
-            "-map", "[v]", "-map", "1:a:0",
-        ]
-
-    cmd += [
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
-        "-movflags", "+faststart", "-shortest", str(dest)
-    ]
-    run(cmd)
-
-
-def parse_timeline_segment(timeline, keywords):
-    text = str(timeline or "")
-    for line in text.splitlines():
-        low = line.lower()
-        if not any(k in low for k in keywords):
-            continue
-        m = re.search(r"(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
-        if m:
-            return float(m.group(1)), float(m.group(2))
-        m = re.search(r"(?:at\s*)?(\d+(?:\.\d+)?)\s*(?:sec|s)\b", low)
-        if m:
-            t = float(m.group(1))
-            return t, t + 0.8
-    return None
-
-
-def choose_answer_time_from_silence(silence_intervals, duration):
-    """Answer often begins right after the main thinking pause."""
-    lo, hi = duration * 0.18, duration * 0.62
-    candidates = []
-    target = duration * 0.36
-    for st, en in silence_intervals:
-        mid = (st + en) / 2.0
-        if lo <= mid <= hi and en - st >= 0.26:
-            score = abs(mid - target) - min(en-st, 1.4) * 0.30
-            candidates.append((score, en + 0.04))
-    return min(candidates)[1] if candidates else None
-
-
-def derive_question_from_title(title):
-    first = clean_display_title(title).split("|")[0].strip()
-    return first if "?" in first else ""
-
-
-def build_qa_timing(clip, source_duration, pacing_plan, silence_intervals):
-    timeline = clip.get("dialogue_timeline") or ""
-    q_seg = parse_timeline_segment(timeline, [" asks ", "asks only", "question"])
-    a_seg = parse_timeline_segment(timeline, ["reveal/answer", "answer.", "answer ", "correct", "result"])
-
-    answer_src = a_seg[0] if a_seg else choose_answer_time_from_silence(silence_intervals, source_duration)
-    if answer_src is None:
-        answer_src = source_duration * 0.35
-
-    if q_seg:
-        q_start_src, q_end_src = q_seg
-    else:
-        q_start_src = 0.55 if source_duration >= 6 else source_duration * 0.08
-        q_end_src = min(answer_src - 0.25, q_start_src + 2.4)
-
-    if a_seg:
-        a_start_src, a_end_src = a_seg
-    else:
-        a_start_src = answer_src
-        a_end_src = min(source_duration - 0.15, a_start_src + 1.5)
-
-    q_start = map_source_time_to_output(q_start_src, pacing_plan)
-    q_end = map_source_time_to_output(max(q_start_src + 0.7, q_end_src + 0.25), pacing_plan)
-    a_start = map_source_time_to_output(a_start_src, pacing_plan)
-    a_end = map_source_time_to_output(min(source_duration, max(a_start_src + 1.25, a_end_src + 1.0)), pacing_plan)
-
-    out_dur = pacing_plan.get("output_duration") or source_duration / LONG_BODY_TARGET_SPEED
-    q_start = max(0.18, min(q_start or 0.5, out_dur - 1.5))
-    a_start = max(q_start + 0.8, min(a_start or out_dur * 0.36, out_dur - 1.0))
-    q_end = min(max(q_start + 1.0, q_end or a_start - 0.2), a_start - 0.12)
-    a_end = min(out_dur - 0.18, max(a_start + 1.25, a_end or a_start + 2.1))
-
-    return {
-        "question_start": q_start,
-        "question_end": q_end,
-        "answer_start": a_start,
-        "answer_end": a_end,
-        "question_source_start": q_start_src,
-        "answer_source_start": a_start_src,
-    }
-
-
-CATEGORY_LABELS = {
-    "alphabet":"ALPHABET", "letters":"LETTER MATCH", "phonics":"PHONICS",
-    "numbers":"NUMBERS", "counting":"COUNTING", "shapes":"SHAPES",
-    "colors":"COLORS", "science":"SCIENCE", "space":"SPACE",
-    "nature":"NATURE", "body":"HEALTHY BODY", "safety":"SAFE & SMART",
-    "emotions":"FEELINGS", "manners":"KINDNESS", "community":"HELPERS",
-    "transport":"LET'S GO", "weather":"WEATHER", "animals":"ANIMALS",
-    "food":"FOOD", "math":"MATH", "opposites":"OPPOSITES",
-    "world":"WORLD", "positions":"POSITION WORDS", "sorting":"SORTING",
-    "patterns":"PATTERNS", "sizes":"SIZES", "directions":"DIRECTIONS",
-    "calendar":"CALENDAR", "seasons":"SEASONS", "time":"ROUTINES",
-    "entertainment":"PLAY & MOVE",
-}
-
-CATEGORY_ACCENTS = {
-    "alphabet":"0xFFD54A", "letters":"0xFFD54A", "phonics":"0xFFB347",
-    "numbers":"0xFFA630", "counting":"0xF5B041", "shapes":"0x5DADE2",
-    "colors":"0x7DFF7A", "science":"0x76D7C4", "space":"0xF4D03F",
-    "nature":"0x7DCEA0", "body":"0xF8C471", "safety":"0xF7DC6F",
-    "emotions":"0xF8C471", "manners":"0xF9E79F", "community":"0xAED6F1",
-    "transport":"0xF5B041", "weather":"0xF7DC6F", "animals":"0xF4D03F",
-    "food":"0x82E0AA", "math":"0xF8C471", "opposites":"0xFFEAA7",
-    "world":"0x58D68D", "positions":"0xF7DC6F", "sorting":"0xF8C471",
-    "patterns":"0xAED6F1", "sizes":"0xF9E79F", "directions":"0xF8C471",
-    "calendar":"0xF9E79F", "seasons":"0x5DADE2", "time":"0xF8C471",
-    "entertainment":"0xFFD54A",
-}
-
-def category_label(category):
-    return CATEGORY_LABELS.get(str(category or "").strip().lower(), "KP KIDS")
-
-
-def category_accent(category):
-    return CATEGORY_ACCENTS.get(str(category or "").strip().lower(), "0xFFD54A")
-
-
-def clean_display_title(value):
-    t = sanitize_text(value)
-    t = re.sub(r"#Shorts\b", "", t, flags=re.I)
-    t = re.sub(r"\|\s*KP\s*Kids.*$", "", t, flags=re.I)
-    t = re.sub(r"\s+with\s+(Kevin|Patrick|Lumi|Bibo).*$", "", t, flags=re.I)
-    t = re.sub(r"^(Learn Something New|Kids Discovery|Quick Quiz|Can You Solve It)\s*:\s*", "", t, flags=re.I)
-    return re.sub(r"\s+", " ", t).strip()[:90]
-
-
-def derive_side_keyword(clip):
-    explicit = sanitize_text(
-        clip.get("keyword") or clip.get("topic") or clip.get("subject") or ""
-    )
-    if explicit:
-        return clean_display_title(explicit)[:34]
-
-    title = clean_display_title(clip.get("title") or "")
-    # Prefer the first useful phrase before a separator/question suffix.
-    title = re.split(r"\s*[|—–]\s*", title)[0].strip()
-    title = re.sub(r"^(What|Why|How|Which|Can)\s+", "", title, flags=re.I)
-    title = re.sub(r"\?$", "", title).strip()
-    return title[:34] or "KP KIDS"
-
-
-def wrap_side_text(text, max_chars=18, max_lines=3):
-    words = str(text or "").split()
-    if not words:
-        return ""
-    lines, cur = [], ""
-    for word in words:
-        test = word if not cur else cur + " " + word
-        if len(test) <= max_chars or not cur:
-            cur = test
-        else:
-            lines.append(cur)
-            cur = word
-            if len(lines) >= max_lines - 1:
-                break
-    if cur and len(lines) < max_lines:
-        lines.append(cur)
-    consumed = " ".join(lines)
-    original = " ".join(words)
-    if len(consumed) < len(original) and lines:
-        lines[-1] = lines[-1].rstrip(" .") + "…"
-    return "\n".join(lines[:max_lines])
-
-
-def write_text_file(path, text):
-    Path(path).write_text(str(text or ""), encoding="utf-8")
-    return str(Path(path).resolve())
-
-
-def drawtext_file_filter(textfile, fontfile, color, fontsize, x, y, alpha, borderw=0, bordercolor=None, line_spacing=8):
-    parts = [
-        f"drawtext=fontfile={fontfile}",
-        f"textfile={textfile}",
-        f"fontcolor={color}",
-        f"fontsize={fontsize}",
-        f"x='{x}'",
-        f"y='{y}'",
-        f"alpha='{alpha}'",
-        f"line_spacing={line_spacing}",
-    ]
-    if borderw:
-        parts.append(f"borderw={borderw}")
-        parts.append(f"bordercolor={bordercolor or color}")
-    return ":".join(parts)
-
-
-def fade_alpha_expr(start, end, fade=0.28):
-    start = float(start)
-    end = float(end)
-    fade = max(0.08, min(float(fade), max(0.08, (end - start) / 3)))
-    return (
-        f"if(lt(t,{start:.3f}),0,"
-        f"if(lt(t,{start+fade:.3f}),(t-{start:.3f})/{fade:.3f},"
-        f"if(lt(t,{end-fade:.3f}),1,"
-        f"if(lt(t,{end:.3f}),({end:.3f}-t)/{fade:.3f},0))))"
-    )
-
-
-def build_side_graphics_filters( clip, duration, clip_index, clip_total, work_dir, qa_timing=None, qa_sync_enabled=True ):
-    """Category on the left; spoken question then spoken answer on the right."""
-    category = str(clip.get("category") or "").strip().lower()
-    accent = category_accent(category)
-    label = category_label(category)
-    series = sanitize_text(clip.get("series_name") or "")
-
-    question = sanitize_text(clip.get("question_line") or "") or derive_question_from_title(clip.get("title") or "")
-    answer = sanitize_text(clip.get("answer_line") or "")
-
-    if series:
-        left_label = f"{label}\n{series[:34]}"
-    else:
-        left_label = label
-
-    left_text = write_text_file(Path(work_dir) / f"side_left_{clip_index:02d}.txt", left_label)
-
-    # User requested NO "1 / 4" or clip counter.
-    filters = []
-    cat_alpha = fade_alpha_expr(0.15, max(0.7, duration - 0.2), 0.30)
-
-    # LEFT — persistent identity only.
-    filters.append(drawtext_file_filter(
-        left_text, FONT, f"{accent}@0.16", 34, LEFT_X, SIDE_CATEGORY_Y,
-        cat_alpha, borderw=10, bordercolor=f"{accent}@0.13", line_spacing=10
-    ))
-    filters.append(drawtext_file_filter(
-        left_text, FONT, "white@0.92", 34, LEFT_X, SIDE_CATEGORY_Y,
-        cat_alpha, borderw=2, bordercolor=f"{accent}@0.92", line_spacing=10
-    ))
-
-    meta = {
-        "category_label": label,
-        "accent": accent,
-        "question": question,
-        "answer": answer,
-        "clip_index": clip_index,
-        "clip_total": clip_total,
-        "counter_drawn": False,
-    }
-
-    if not qa_sync_enabled:
-        return filters, meta
-
-    timing = qa_timing or {
-        "question_start": 0.45,
-        "question_end": min(3.0, duration * 0.28),
-        "answer_start": min(4.2, duration * 0.38),
-        "answer_end": min(duration - 0.2, 6.8),
-    }
-
-    # Question appears while the lead asks it.
-    if question:
-        q_text = write_text_file(
-            Path(work_dir) / f"side_question_{clip_index:02d}.txt",
-            wrap_side_text(question, max_chars=19, max_lines=3)
-        )
-        qs, qe = timing["question_start"], timing["question_end"]
-        q_alpha = fade_alpha_expr(qs, qe, 0.25)
-        q_x = f"if(lt(t,{qs+0.42:.3f}),{RIGHT_X}+55*({qs+0.42:.3f}-t)/0.42,{RIGHT_X})"
-
-        filters.append(drawtext_file_filter(
-            q_text, FONT_ITALIC, f"{accent}@0.17", 43, q_x, SIDE_TITLE_Y,
-            q_alpha, borderw=11, bordercolor=f"{accent}@0.14", line_spacing=10
-        ))
-        filters.append(drawtext_file_filter(
-            q_text, FONT_ITALIC, "white@0.98", 43, q_x, SIDE_TITLE_Y,
-            q_alpha, borderw=2, bordercolor=f"{accent}@0.96", line_spacing=10
-        ))
-
-    # Answer replaces the question exactly around the spoken reveal.
-    if answer:
-        a_text = write_text_file(
-            Path(work_dir) / f"side_answer_{clip_index:02d}.txt",
-            wrap_side_text(answer.upper(), max_chars=16, max_lines=2)
-        )
-        ast, aen = timing["answer_start"], timing["answer_end"]
-        a_alpha = fade_alpha_expr(ast, aen, 0.24)
-        a_x = f"if(lt(t,{ast+0.48:.3f}),{RIGHT_X}+72*({ast+0.48:.3f}-t)/0.48,{RIGHT_X})"
-
-        # Wide soft halo + brighter entrance pulse + crisp core.
-        filters.append(drawtext_file_filter(
-            a_text, FONT_ITALIC, f"{accent}@0.20", 56, a_x, SIDE_KEYWORD_Y,
-            a_alpha, borderw=15, bordercolor=f"{accent}@0.15", line_spacing=9
-        ))
-
-        pulse_end = min(aen, ast + 0.58)
-        pulse_alpha = fade_alpha_expr(ast, pulse_end, 0.16)
-        filters.append(drawtext_file_filter(
-            a_text, FONT_ITALIC, f"{accent}@0.17", 58, a_x, SIDE_KEYWORD_Y,
-            pulse_alpha, borderw=20, bordercolor=f"{accent}@0.12", line_spacing=9
-        ))
-
-        filters.append(drawtext_file_filter(
-            a_text, FONT_ITALIC, "white@0.99", 56, a_x, SIDE_KEYWORD_Y,
-            a_alpha, borderw=2, bordercolor=f"{accent}@0.99", line_spacing=9
-        ))
-
-    meta["qa_timing"] = timing
-    return filters, meta
-
-
-def normalize_brand_clip(src, dest):
-    """Normalize landscape intro/closure to the same delivery format."""
-    dur = max(0.5, ffprobe_duration(src))
-    audio = has_audio(src)
-    vf = (
-        f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=decrease,"
-        f"pad={OUTPUT_W}:{OUTPUT_H}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"fps={OUTPUT_FPS},format=yuv420p"
-    )
-    cmd = ["ffmpeg", "-y", "-i", str(src)]
-    if not audio:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
-    cmd += ["-vf", vf]
-    if audio:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0", "-af", "aresample=48000,volume=1.0"]
-    else:
-        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
-    cmd += [
-        "-r", str(OUTPUT_FPS), "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
-        "-movflags", "+faststart", "-shortest", str(dest)
-    ]
-    run(cmd)
-
-
-def normalize_vertical_clip( src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True, smart_landscape_recut_enabled=True ):
-    """Smart-pace a Short and create a child-readable 16:9 landscape re-cut. Default V1.5 mode does NOT shrink the full portrait into the center. Instead it uses a large 4:3 focus crop (1440x1080) over a subdued blurred background. The crop pans smoothly from the character zone during the question to the lesson/object zone around the answer, then settles to a balanced middle frame. The legacy full-portrait composition remains available as a fallback. """
-    clip = clip or {}
-    source_dur = max(0.5, ffprobe_duration(src))
-    silence_intervals = detect_silence_intervals(src, source_dur) if smart_pacing_enabled else []
-    pacing_plan = (
-        build_pacing_plan(source_dur, silence_intervals)
-        if smart_pacing_enabled
-        else {
-            "segments": [{"source_start":0.0,"source_end":source_dur,"kind":"speech","speed":1.0,
-                          "output_start":0.0,"output_end":source_dur}],
-            "output_duration": source_dur,
-            "target_duration": source_dur,
-            "silence_count": 0,
-        }
-    )
-
-    paced_src = Path(dest).with_name(Path(dest).stem + "_paced.mp4")
-    if smart_pacing_enabled:
-        create_paced_clip(src, paced_src, pacing_plan)
-    else:
-        # Still normalize container/audio layout once for predictable composition.
-        run([
-            "ffmpeg","-y","-i",str(src),
-            "-c:v","libx264","-preset","veryfast",
-            "-c:a","aac","-b:a",AUDIO_BITRATE,"-ar",str(AUDIO_RATE),"-ac","2",
-            "-movflags","+faststart",str(paced_src)
-        ])
-
-    dur = max(0.5, ffprobe_duration(paced_src))
-    fade_out = max(0.0, dur - SEGMENT_FADE)
-    qa_timing = build_qa_timing(clip, source_dur, pacing_plan, silence_intervals)
-
-    # ------------------------------------------------------------------
-    # SMART LANDSCAPE RECUT
-    # ------------------------------------------------------------------
-    # A full 9:16 frame scaled to 1080p makes the characters too small for
-    # a children's long-form video. V1.5 therefore uses a large 4:3 focus
-    # window. It preserves the source width and crops only vertically, then
-    # scales that crop to 1440x1080. The remaining 240 px on each side are
-    # filled by the subdued blurred source.
-    src_w, src_h = ffprobe_dimensions(paced_src)
-    category = str(clip.get("category") or "").strip().lower()
-    focus_w = 1440
-    focus_h = OUTPUT_H
-
-    if smart_landscape_recut_enabled and src_w > 0 and src_h > src_w:
-        crop_w = src_w
-        crop_h = min(src_h, max(2, int(round(src_w * 3.0 / 4.0))))
-        crop_h -= crop_h % 2
-        max_y = max(0, src_h - crop_h)
-
-        # Question = character/face zone. Reveal = teaching-object zone.
-        char_y = int(round(max_y * 0.30))
-        mid_y = int(round(max_y * 0.40))
-        lower_focus_categories = {
-            "alphabet", "letters", "phonics", "numbers", "counting",
-            "shapes", "colors", "patterns", "sorting", "math",
-            "positions", "sizes", "directions", "calendar", "time"
-        }
-        face_focus_categories = {"body", "emotions", "manners", "community"}
-        if category in lower_focus_categories:
-            lesson_y = int(round(max_y * 0.62))
-        elif category in face_focus_categories:
-            lesson_y = int(round(max_y * 0.30))
-        else:
-            lesson_y = int(round(max_y * 0.48))
-
-        ast = float(qa_timing.get("answer_start", dur * 0.38))
-        aen = float(qa_timing.get("answer_end", min(dur - 0.2, ast + 2.2)))
-        transition = min(0.55, max(0.30, dur * 0.035))
-        t1 = max(0.8, ast - transition)
-        t2 = min(max(t1 + transition + 0.5, aen), dur - transition - 0.15)
-
-        # Smooth piecewise pan. Avoid rapid face tracking: the camera only moves
-        # at the semantic question->answer boundaries.
-        yexpr = (
-            f"if(lt(t,{t1:.3f}),{char_y},"
-            f"if(lt(t,{t1+transition:.3f}),{char_y}+({lesson_y}-{char_y})*(t-{t1:.3f})/{transition:.3f},"
-            f"if(lt(t,{t2:.3f}),{lesson_y},"
-            f"if(lt(t,{t2+transition:.3f}),{lesson_y}+({mid_y}-{lesson_y})*(t-{t2:.3f})/{transition:.3f},{mid_y}))))"
-        )
-
-        base_graph = (
-            f"[0:v]split=2[bg][focus];"
-            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=38,eq=brightness=-0.15:saturation=0.72[bg2];"
-            f"[focus]crop={crop_w}:{crop_h}:0:'{yexpr}',"
-            f"scale={focus_w}:{focus_h}:flags=lanczos,setsar=1[focus2];"
-            f"[bg2][focus2]overlay=(W-w)/2:0[base]"
-        )
-        # The old large side captions would cover the enlarged teaching frame.
-        # In recut mode the picture is the lesson, so suppress those overlays.
-        effective_side_graphics = False
-        recut_meta = {
-            "mode": "smart_4x3_recut",
-            "source_size": f"{src_w}x{src_h}",
-            "focus_size": f"{focus_w}x{focus_h}",
-            "crop_size": f"{crop_w}x{crop_h}",
-            "character_y": char_y,
-            "lesson_y": lesson_y,
-            "settle_y": mid_y,
-            "answer_start": round(ast, 3),
-            "answer_end": round(aen, 3),
-        }
-    else:
-        base_graph = (
-            f"[0:v]split=2[bg][fg];"
-            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=32,eq=brightness=-0.11:saturation=0.82[bg2];"
-            f"[fg]scale=-2:{FOREGROUND_H}:force_original_aspect_ratio=decrease,"
-            f"setsar=1[fg2];"
-            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base]"
-        )
-        effective_side_graphics = side_graphics_enabled
-        recut_meta = {"mode": "legacy_full_portrait"}
-
-    graphic_meta = {"landscape_recut": recut_meta}
-    if effective_side_graphics:
-        filters, side_meta = build_side_graphics_filters(
-            clip, dur, clip_index, clip_total, Path(dest).parent,
-            qa_timing=qa_timing, qa_sync_enabled=qa_sync_enabled
-        )
-        graphic_meta.update(side_meta)
-        chain = "[base]"
-        for i, flt in enumerate(filters):
-            out_label = f"g{i}"
-            base_graph += f";{chain}{flt}[{out_label}]"
-            chain = f"[{out_label}]"
-        base_graph += (
-            f";{chain}fade=t=in:st=0:d={SEGMENT_FADE:.2f},"
-            f"fade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
-            f"fps={OUTPUT_FPS},format=yuv420p[v]"
-        )
-    else:
-        base_graph += (
-            f";[base]fade=t=in:st=0:d={SEGMENT_FADE:.2f},"
-            f"fade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
-            f"fps={OUTPUT_FPS},format=yuv420p[v]"
-        )
-
-    cmd = ["ffmpeg", "-y", "-i", str(paced_src), "-filter_complex", base_graph, "-map", "[v]"]
-    if has_audio(paced_src):
-        cmd += [
-            "-map", "0:a:0",
-            "-af",
-            f"aresample=48000,afade=t=in:st=0:d={SEGMENT_FADE:.2f},"
-            f"afade=t=out:st={fade_out:.3f}:d={SEGMENT_FADE:.2f},"
-            "loudnorm=I=-15:LRA=11:TP=-1.5"
-        ]
-    else:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo", "-map", "1:a:0"]
-
-    cmd += [
-        "-r", str(OUTPUT_FPS), "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
-        "-movflags", "+faststart", "-shortest", str(dest)
-    ]
-    run(cmd)
-
-    pacing_meta = {
-        "source_duration": round(source_dur, 3),
-        "output_duration": round(dur, 3),
-        "silence_count": len(silence_intervals),
-        "segments": [
-            {
-                "kind": x["kind"],
-                "source_start": round(x["source_start"], 3),
-                "source_end": round(x["source_end"], 3),
-                "speed": round(x["speed"], 4),
+        feats = _decode_energy_seconds(track_path)
+        if not feats:
+            raise RuntimeError("no audio features")
+        window = max(2, int(math.ceil(needed)))
+        start_min = max(0, int(math.floor(head_margin)))
+        start_max = min(len(feats) - window, int(math.floor(latest)))
+        if start_max < start_min:
+            start_min, start_max = 0, max(0, len(feats) - window)
+
+        max_rms = max((f[0] for f in feats), default=1e-6) or 1e-6
+        max_act = max((f[1] for f in feats), default=1e-6) or 1e-6
+        candidates = []
+        for st in range(start_min, start_max + 1):
+            chunk = feats[st:st+window]
+            rms_vals = [x[0] / max_rms for x in chunk]
+            act_vals = [x[1] / max_act for x in chunk]
+            mean_rms = sum(rms_vals) / len(rms_vals)
+            mean_act = sum(act_vals) / len(act_vals)
+            variance = sum((x - mean_rms) ** 2 for x in rms_vals) / len(rms_vals)
+            dynamic = math.sqrt(max(0.0, variance))
+            early = sum(rms_vals[:min(3, len(rms_vals))]) / min(3, len(rms_vals))
+            silence_penalty = sum(1 for x in rms_vals if x < 0.10) / len(rms_vals)
+
+            if profile["name"] == "calm_warm":
+                score = 0.58 * mean_rms + 0.18 * mean_act + 0.14 * early + 0.10 * (1.0 - min(1.0, dynamic))
+            elif profile["name"] == "playful_dance":
+                score = 0.48 * mean_rms + 0.32 * mean_act + 0.12 * dynamic + 0.08 * early
+            else:
+                score = 0.52 * mean_rms + 0.26 * mean_act + 0.12 * dynamic + 0.10 * early
+            score -= 0.45 * silence_penalty
+            candidates.append((score, float(st)))
+
+        if candidates:
+            candidates.sort(reverse=True)
+            # Pick among the three strongest windows so successive shorts do not all use
+            # one identical hook while still staying inside the track's strongest area.
+            top = candidates[:min(3, len(candidates))]
+            rng = random.Random(_music_seed(payload, track_path.name + "|segment"))
+            score, start = top[rng.randrange(len(top))]
+            return {
+                "start": min(start, latest), "duration": needed,
+                "track_duration": track_duration, "score": round(float(score), 5),
+                "method": "energy-activity-highlight"
             }
-            for x in pacing_plan.get("segments", [])
-        ],
+    except Exception as e:
+        print(f"Music highlight analysis failed for {track_path.name}: {e}", flush=True)
+
+    # Robust deterministic fallback: still avoid the long intro/outro.
+    span = max(0.0, latest - head_margin)
+    rng = random.Random(_music_seed(payload, track_path.name + "|fallback"))
+    start = head_margin + (rng.random() * span if span > 0 else 0.0)
+    return {
+        "start": round(start, 3), "duration": needed, "track_duration": track_duration,
+        "score": 0.0, "method": "safe-random-middle"
     }
-    return dur, graphic_meta, pacing_meta
 
 
-def concat_files(files, dest):
-    list_path = Path(dest).with_suffix(".concat.txt")
-    with open(list_path, "w", encoding="utf-8") as f:
-        for p in files:
-            escaped = str(Path(p).resolve()).replace("'", "'\\''")
-            f.write(f"file '{escaped}'\n")
-    run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
-        "-c", "copy", str(dest)
-    ])
+def _library_music_gains(profile, payload):
+    """V8.3: keep the music clearly audible even while dialogue is present."""
+    level = str(payload.get("music_level") or "present").strip().lower()
+
+    if profile["name"] == "playful_dance":
+        normal, duck = 0.86, 0.48
+    elif profile["name"] == "calm_warm":
+        normal, duck = 0.70, 0.39
+    elif profile["name"] == "curious_space":
+        normal, duck = 0.77, 0.42
+    else:
+        normal, duck = 0.79, 0.43
+
+    if level in {"soft", "low", "gentle"}:
+        normal *= 0.86
+        duck *= 0.88
+    elif level in {"strong", "high", "loud"}:
+        normal *= 1.06
+        duck *= 1.06
+
+    duck = max(duck, normal * 0.50)
+    return min(normal, 1.05), min(duck, 0.58)
 
 
-def choose_music_profile(payload, clips):
-    explicit = str(payload.get("music_profile") or "").strip()
-    if explicit in MUSIC_PROFILES:
-        return explicit
-    text = " ".join(
-        [str(payload.get("title") or ""), str(payload.get("content_mode") or "")] +
-        [f"{c.get('category','')} {c.get('title','')} {c.get('lesson_key','')}" for c in clips]
-    ).lower()
-    if re.search(r"entertainment|dance|freeze|wiggle|party|clap|stomp|rhythm", text):
-        return "playful_dance"
-    if re.search(r"night|sleep|bedtime|calm|emotion|mindful", text):
-        return "calm_warm"
-    if re.search(r"space|rocket|moon|mars|planet|astronaut|mystery", text):
-        return "curious_space"
-    if re.search(r"nature|animal|weather|forest|garden|plant|butterfly|rain|snow", text):
-        return "sunny_plucks"
-    return "learning_plucks"
+def mix_library_music_bed(video_in, track_path, output, duration, speech_windows, payload, profile, segment):
+    """Mix one selected real-music highlight while keeping dialogue clearly dominant."""
+    normal_gain, duck_gain = _library_music_gains(profile, payload)
+    volume_expr = _music_duck_expr(speech_windows, normal_gain, duck_gain)
+    fade_out = max(0.0, float(duration) - 0.55)
+    seg_start = max(0.0, float(segment.get("start") or 0.0))
+    seg_dur = max(1.0, float(duration))
 
-
-def choose_music_file(profile, seed_text=""):
-    root = Path(__file__).resolve().parent / "music"
-    candidates = [root / n for n in MUSIC_PROFILES.get(profile, []) if (root / n).exists()]
-    if not candidates:
-        # Any MP3 fallback.
-        candidates = list(root.glob("*.mp3"))
-    if not candidates:
-        return None
-    seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:12], 16)
-    return candidates[seed % len(candidates)]
-
-
-def mix_music(body_video, dest, profile, seed_text=""):
-    music = choose_music_file(profile, seed_text)
-    if not music:
-        print("No music library found; keeping body audio only.", flush=True)
-        run(["ffmpeg", "-y", "-i", str(body_video), "-c", "copy", str(dest)])
-        return {"profile": profile, "track": "", "segment_start": 0.0, "source": "none"}
-
-    body_dur = ffprobe_duration(body_video)
-    music_dur = ffprobe_duration(music)
-    seed = int(hashlib.sha256((seed_text + str(music)).encode("utf-8")).hexdigest()[:12], 16)
-    rng = random.Random(seed)
-    max_start = max(0.0, music_dur - min(body_dur, 45.0) - 2.0)
-    start = round(rng.uniform(0.0, max_start), 2) if max_start > 1 else 0.0
-    fade_out = max(0.0, body_dur - 1.2)
-
-    # Loop music if the compilation is longer than the track. Sidechain compressor
-    # reduces the bed while source speech is present, but lets it breathe between lines.
     fc = (
-        f"[0:a]aresample=48000,volume=1.0,asplit=2[speech_sc][speech_mix];"
-        f"[1:a]aresample=48000,highpass=f=70,lowpass=f=12500,"
-        f"loudnorm=I=-20:TP=-2.5:LRA=9,volume={MUSIC_GAIN:.3f},"
-        f"afade=t=in:st=0:d=0.8,afade=t=out:st={fade_out:.3f}:d=1.2[music];"
-        f"[music][speech_sc]sidechaincompress=threshold=0.080:ratio=1.8:attack=22:release=360:makeup=1:mix=0.30[ducked];"
-        f"[speech_mix][ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
-        f"alimiter=limit=0.95[aout]"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
+        "asplit=2[main][speechsc];"
+        f"[1:a]atrim=start={seg_start:.3f}:duration={seg_dur:.3f},asetpts=PTS-STARTPTS,"
+        "aformat=sample_rates=48000:channel_layouts=stereo,"
+        "highpass=f=75,lowpass=f=12000,"
+        "loudnorm=I=-20:TP=-2.5:LRA=9,"
+        f"volume='{volume_expr}':eval=frame,"
+        "afade=t=in:st=0:d=0.28,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.55[musicbase];"
+        # Dynamic protection catches speech even if silence detection/timeline is imperfect.
+        "[musicbase][speechsc]sidechaincompress="
+        "threshold=0.080:ratio=1.8:attack=18:release=300:makeup=1:mix=0.30[duckedmusic];"
+        "[main][duckedmusic]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.94[aout]"
     )
-    run([
-        "ffmpeg", "-y", "-i", str(body_video),
-        "-ss", f"{start:.2f}", "-stream_loop", "-1", "-i", str(music),
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_in), "-i", str(track_path),
         "-filter_complex", fc,
         "-map", "0:v:0", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE,
-        "-ar", str(AUDIO_RATE), "-ac", "2", "-t", f"{body_dur:.3f}",
-        "-movflags", "+faststart", str(dest)
-    ])
-    return {"profile": profile, "track": music.name, "segment_start": start, "source": "real_music_library"}
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
+    ]
+    run(cmd)
+    return {
+        "source": "user_mp3_library",
+        "profile": profile["name"],
+        "track": track_path.name,
+        "segment_start": round(seg_start, 3),
+        "segment_duration": round(seg_dur, 3),
+        "track_duration": round(float(segment.get("track_duration") or 0.0), 3),
+        "highlight_score": segment.get("score", 0.0),
+        "highlight_method": segment.get("method", "unknown"),
+        "normal_gain": normal_gain,
+        "speech_duck_gain": duck_gain,
+        "dynamic_sidechain": True,
+        "music_level": str(payload.get("music_level") or "present"),
+        "music_loudnorm_target_lufs": -20,
+    }
+
+def generate_original_music_bed(dest, duration, payload):
+    """Generate deterministic, original, child-friendly instrumental WAV."""
+    profile = _music_profile(payload)
+    sr = 24000
+    total = max(1, int(float(duration) * sr))
+    samples = [0.0] * total
+
+    seed_text = "|".join(str(payload.get(k, "")) for k in ["short_id","lesson_key","topic","category","content_mode"])
+    seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:16], 16)
+    rng = random.Random(seed)
+
+    root = profile["root"]
+    # Major pentatonic gives a reliably upbeat preschool sound without imitating a song.
+    ratios = [1.0, 9/8, 5/4, 3/2, 5/3, 2.0]
+    melody = [0, 2, 4, 2, 1, 3, 4, 3, 0, 2, 3, 1, 0, 4, 2, 1]
+    if profile["name"] == "curious_space":
+        melody = [0, 3, 1, 4, 2, 3, 0, 4, 1, 3, 2, 5, 4, 2, 1, 0]
+    elif profile["name"] == "calm_warm":
+        melody = [0, 2, 3, 2, 0, 1, 2, 1, 0, 2, 4, 2, 1, 0, 1, 2]
+
+    def add_tone(start_s, dur_s, freq, amp, bell=False):
+        start = int(max(0.0, start_s) * sr)
+        count = min(int(dur_s * sr), total - start)
+        if count <= 0:
+            return
+        attack = max(1, int(0.018 * sr))
+        for i in range(count):
+            t = i / sr
+            a = min(1.0, i / attack) * math.exp(-4.6 * t / max(dur_s, 0.05))
+            v = math.sin(2 * math.pi * freq * t)
+            v += 0.22 * math.sin(2 * math.pi * freq * 2.0 * t)
+            if bell:
+                v += 0.10 * math.sin(2 * math.pi * freq * 3.01 * t)
+            samples[start+i] += amp * a * v
+
+    def add_kick(start_s, amp):
+        start = int(start_s * sr)
+        count = min(int(0.115 * sr), total - start)
+        for i in range(max(0, count)):
+            t = i / sr
+            freq = 105 - 58 * min(1.0, t / 0.115)
+            env = math.exp(-26 * t)
+            samples[start+i] += amp * env * math.sin(2 * math.pi * freq * t)
+
+    def add_tick(start_s, amp):
+        start = int(start_s * sr)
+        count = min(int(0.045 * sr), total - start)
+        for i in range(max(0, count)):
+            t = i / sr
+            env = math.exp(-65 * t)
+            samples[start+i] += amp * env * (rng.random() * 2.0 - 1.0)
+
+    beat = 60.0 / profile["tempo"]
+    eighth = beat / 2.0
+    steps = int(math.ceil(duration / eighth)) + 1
+    for step_idx in range(steps):
+        swing = profile["swing"] if step_idx % 2 else 0.0
+        st = step_idx * eighth + swing
+        if st >= duration:
+            break
+        note_idx = melody[step_idx % len(melody)]
+        # Tiny deterministic variation prevents every episode using an identical tune.
+        if step_idx % 8 == 6 and rng.random() > 0.45:
+            note_idx = min(5, note_idx + 1)
+        freq = root * ratios[note_idx]
+        note_amp = 0.105 if profile["name"] == "playful_dance" else 0.085
+        if profile["name"] == "calm_warm":
+            note_amp = 0.060
+        add_tone(st, min(0.34, eighth * 0.92), freq, note_amp, bell=True)
+
+        if step_idx % 2 == 0:
+            # Low root/fifth pulse anchors the beat softly.
+            low = (root / 2.0) * (1.5 if (step_idx // 2) % 4 in [1,3] else 1.0)
+            add_tone(st, min(0.30, beat * 0.55), low, 0.032 + 0.018 * profile["percussion"], bell=False)
+        if step_idx % 4 == 0:
+            add_kick(st, 0.035 * profile["percussion"])
+        elif step_idx % 2 == 1:
+            add_tick(st, 0.017 * profile["percussion"])
+
+    # Gentle held harmony every two beats.
+    bar = beat * 4
+    t = 0.0
+    chord_cycle = [(0,2,4), (1,3,5), (0,2,4), (0,3,4)]
+    ci = 0
+    while t < duration:
+        chord = chord_cycle[ci % len(chord_cycle)]
+        for idx in chord:
+            add_tone(t, min(bar * 0.92, duration - t), (root/2.0)*ratios[idx], 0.012 if profile["name"] != "calm_warm" else 0.009, bell=False)
+        t += bar
+        ci += 1
+
+    peak = max((abs(x) for x in samples), default=1.0)
+    scale = 0.82 / peak if peak > 0.82 else 1.0
+    with wave.open(str(dest), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        chunk = bytearray()
+        for x in samples:
+            v = int(max(-1.0, min(1.0, x * scale)) * 32767)
+            chunk += int(v).to_bytes(2, byteorder="little", signed=True)
+        wf.writeframes(chunk)
+    return profile
 
 
-def decode_payload(payload_b64):
-    try:
-        return json.loads(base64.b64decode(payload_b64).decode("utf-8"))
-    except Exception as e:
-        raise RuntimeError(f"Invalid payload_b64: {e}")
+def _music_duck_expr(speech_windows, normal_gain, duck_gain):
+    expr = f"{normal_gain:.4f}"
+    # Explicit dialogue windows keep the generated music lower while anyone speaks.
+    for st, en in reversed((speech_windows or [])[:24]):
+        expr = f"if(between(t,{max(0.0,st):.3f},{max(st,en):.3f}),{duck_gain:.4f},{expr})"
+    return expr
+
+
+def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows, payload, profile=None):
+    profile = profile or _music_profile(payload)
+    volume_expr = _music_duck_expr(speech_windows, profile["gain"], profile["duck_gain"])
+    fade_out = max(0.0, float(duration) - 0.45)
+    fc = (
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[main];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+        "highpass=f=90,lowpass=f=9000,"
+        f"volume='{volume_expr}':eval=frame,"
+        "afade=t=in:st=0:d=0.30,"
+        f"afade=t=out:st={fade_out:.3f}:d=0.45[music];"
+        "[main][music]amix=inputs=2:normalize=0:duration=first,"
+        "alimiter=limit=0.94[aout]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_in), "-i", str(music_wav),
+        "-filter_complex", fc,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
+    ]
+    run(cmd)
+    return profile
+
+def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP_SECONDS):
+    """Normalize intro/closure to output format and retime to a concise 3s+ branding clip. Existing clips longer than target are trimmed cleanly. Clips shorter than the minimum are padded by holding the final frame and padding audio, so branding never drops below the requested minimum duration. Intro/closure speed itself is never changed. """
+    info = ffprobe_video_info(src)
+    src_dur = max(float(info.get("duration") or 0.0), 0.01)
+    if target_duration is None:
+        target_duration = src_dur
+    target_duration = max(float(target_duration), float(min_duration))
+    effective_duration = target_duration
+
+    # Always allow a final-frame hold, then trim to the exact target. This makes
+    # both long and unexpectedly short brand clips robust without changing speed.
+    vf = (
+        f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+        f"crop={OUTPUT_W}:{OUTPUT_H},fps={OUTPUT_FPS},setsar=1,format=yuv420p,"
+        f"tpad=stop_mode=clone:stop_duration={effective_duration:.3f},"
+        f"trim=duration={effective_duration:.3f},setpts=PTS-STARTPTS"
+    )
+
+    cmd = ["ffmpeg", "-y", "-i", str(src)]
+    if not info["has_audio"]:
+        cmd += [
+            "-f", "lavfi", "-i",
+            f"anullsrc=r=48000:cl=stereo:d={effective_duration:.3f}"
+        ]
+
+    if info["has_audio"]:
+        af = (
+            f"aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"apad=pad_dur={effective_duration:.3f},atrim=duration={effective_duration:.3f},"
+            f"asetpts=PTS-STARTPTS,"
+            f"loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},alimiter=limit=0.94"
+        )
+    else:
+        af = (
+            f"aformat=sample_rates=48000:channel_layouts=stereo,atrim=duration={effective_duration:.3f},"
+            f"asetpts=PTS-STARTPTS,loudnorm=I={TARGET_LUFS:.1f}:LRA=7:TP={TARGET_TRUE_PEAK_DB:.1f},"
+            f"alimiter=limit=0.94"
+        )
+
+    cmd += [
+        "-map", "0:v:0",
+        "-map", "0:a:0" if info["has_audio"] else "1:a:0",
+        "-vf", vf,
+        "-af", af,
+        "-t", f"{effective_duration:.3f}",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(dest),
+    ]
+    run(cmd)
+
+
+def prepend_intro(intro, body, output, xfade_dur=0.28):
+    """Subtle intro-to-story dissolve; kept short so the generated hook stays energetic."""
+    intro_dur = ffprobe_duration(intro)
+    xfade_dur = min(xfade_dur, max(intro_dur - 0.05, 0.05))
+    offset = max(0.0, intro_dur - xfade_dur)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(intro), "-i", str(body),
+        "-filter_complex",
+        f"[0:v:0]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
+        f"[1:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
+        f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(output),
+    ]
+    run(cmd)
+
+
+def append_closure(body_with_intro, closure, output, xfade_dur=0.42):
+    """Append the fixed closure with one clean transition, no redundant body end-card."""
+    main_dur = ffprobe_duration(body_with_intro)
+    closure_dur = ffprobe_duration(closure)
+    xfade_dur = min(
+        xfade_dur,
+        max(main_dur - 0.05, 0.05),
+        max(closure_dur - 0.05, 0.05),
+    )
+    offset = max(0.0, main_dur - xfade_dur)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(body_with_intro), "-i", str(closure),
+        "-filter_complex",
+        f"[0:v:0]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
+        f"[1:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v1];"
+        f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
+        "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
+        f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", str(output),
+    ]
+    run(cmd)
+
+
+def edit_video(src, out, payload):
+    """Render the full KP Kids montage without semantic QA or story repair. The RAW story order is preserved exactly. The editor only applies presentation polish: smart pacing, typography, light camera treatment, color/audio normalization and transitions. """
+    info = ffprobe_video_info(src)
+    source_duration = min(15.0, info["duration"] or 15.0)
+    silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+
+    pacing_plan = build_pacing_plan(source_duration, silence_intervals)
+    duration = pacing_plan["output_duration"] or source_duration / SHORT_PLAYBACK_SPEED
+
+    theme = category_theme(payload.get("category"))
+    color_plan = category_color_plan(payload.get("category"))
+    edit_plan = build_edit_plan(payload, duration)
+    timing = build_timing_plan(payload, source_duration, pacing_plan, silence_intervals)
+    texts = build_text_plan(payload, edit_plan)
+    motion_plan = build_motion_typography_plan(payload, edit_plan)
+    motion_graphics_plan = build_motion_graphics_plan(payload, edit_plan, theme)
+    transition_plan = build_transition_plan(edit_plan)
+
+    source_speech = complement_intervals(silence_intervals, source_duration)
+    speech_windows = map_intervals_to_output(source_speech, pacing_plan)
+    output_silences = map_intervals_to_output(silence_intervals, pacing_plan)
+
+    vf = build_visual_filter(
+        info, payload, duration, edit_plan, timing, texts, theme, pacing_plan,
+        color_plan, motion_plan, motion_graphics_plan
+    )
+    af = build_audio_filter(
+        info, duration, edit_plan, timing, pacing_plan, speech_windows,
+        motion_plan, motion_graphics_plan
+    )
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-filter_complex", vf + ";" + af,
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-movflags", "+faststart", "-t", f"{duration:.3f}", str(out),
+    ]
+    run(cmd)
+
+    return {
+        "editorial_style": edit_plan["style"],
+        "edit_plan": edit_plan,
+        "timing_plan": timing,
+        "transition_plan": transition_plan,
+        "pacing_plan": pacing_plan,
+        "source_silence_intervals": silence_intervals,
+        "output_silence_intervals": output_silences,
+        "output_speech_intervals": speech_windows,
+        "color_plan": color_plan,
+        "theme": theme,
+        "body_duration": duration,
+        "source_info": info,
+        "texts": texts,
+        "motion_typography_plan": motion_plan,
+        "motion_graphics_plan": motion_graphics_plan,
+        "audio_plan": {
+            "target_lufs": TARGET_LUFS,
+            "target_true_peak_db": TARGET_TRUE_PEAK_DB,
+            "silence_threshold_db": SILENCE_DB,
+            "silence_min_duration": SILENCE_MIN_DURATION,
+            "dialogue_focus": bool(speech_windows and info["has_audio"]),
+            "sfx_ducking": bool(motion_plan.get("opening_sfx") != "none" or motion_plan.get("keyword_sfx") != "none"),
+            "text_sfx": {"opening": motion_plan.get("opening_sfx"), "keyword": motion_plan.get("keyword_sfx")},
+            "motion_graphics_sfx": "none",
+        },
+    }
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload-b64", required=True)
-    ap.add_argument("--output", default="kp_kids_long_video.mp4")
-    ap.add_argument("--meta-out", default="long_result_meta.json")
+    ap.add_argument("--output", default="kp_kids_edited_short.mp4")
     args = ap.parse_args()
 
-    payload = decode_payload(args.payload_b64)
-    clips = payload.get("clips") or payload.get("selected_clips") or []
-    raw_proxy_base_url = str(payload.get("raw_proxy_base_url") or "").strip()
-    raw_proxy_token = str(payload.get("raw_proxy_token") or "").strip()
+    payload = json.loads(base64.b64decode(args.payload_b64).decode("utf-8"))
+    source_url = payload["video_url"]
 
-    include_intro = payload_bool(payload, "include_intro", False)
-    include_closure = payload_bool(payload, "include_closure", False)
-    intro_drive_file_id = str(payload.get("intro_drive_file_id") or "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf").strip()
-    closure_drive_file_id = str(payload.get("closure_drive_file_id") or "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP").strip()
+    def payload_bool(name, default=True):
+        value = payload.get(name, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", ""}:
+            return False
+        return bool(default)
 
-    print(
-        f"Branding choice: intro={include_intro} closure={include_closure} "
-        f"intro_id={intro_drive_file_id} closure_id={closure_drive_file_id}",
-        flush=True,
+    include_intro = payload_bool("include_intro", True)
+    include_closure = payload_bool("include_closure", True)
+    edit_variant = str(payload.get("edit_variant") or (
+        "both" if include_intro and include_closure else
+        "intro" if include_intro else
+        "closure" if include_closure else
+        "none"
+    ))
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        src = td / "source.mp4"
+        intro_raw = td / "kp_kids_intro_raw.mp4"
+        intro_norm = td / "kp_kids_intro_normalized.mp4"
+        closure_raw = td / "kp_kids_closure_raw.mp4"
+        closure_norm = td / "kp_kids_closure_normalized.mp4"
+        edited_body = td / "kp_kids_edited_body.mp4"
+        edited_body_music = td / "kp_kids_edited_body_music.mp4"
+        music_bed_wav = td / "kp_kids_original_music.wav"
+        body_with_intro = td / "kp_kids_with_intro.mp4"
+
+        download(source_url, src)
+        result = edit_video(src, edited_body, payload)
+
+        # Short montage uses the same music-bed approach as the Long builder.
+        # Payload can still explicitly disable it if ever needed.
+        music_bed_enabled = payload_bool("music_bed_enabled", True)
+        music_library_enabled = payload_bool("music_library_enabled", True)
+        body_for_branding = edited_body
+        music_profile = None
+        music_result = {"source": "disabled"}
+        if music_bed_enabled:
+            music_profile = _music_profile(payload)
+            used_library = False
+            if music_library_enabled:
+                library_dir = find_music_library(payload)
+                if library_dir is not None:
+                    track = choose_library_track(library_dir, payload, music_profile)
+                    if track is not None:
+                        try:
+                            segment = choose_engaging_segment(track, result["body_duration"], payload, music_profile)
+                            music_result = mix_library_music_bed(
+                                edited_body, track, edited_body_music, result["body_duration"],
+                                result.get("output_speech_intervals") or [], payload, music_profile, segment
+                            )
+                            music_result["library_dir"] = str(library_dir)
+                            used_library = True
+                        except Exception as e:
+                            print(f"Real music library mix failed; using procedural fallback: {e}", flush=True)
+            if not used_library:
+                music_profile = generate_original_music_bed(music_bed_wav, result["body_duration"], payload)
+                mix_original_music_bed(
+                    edited_body, music_bed_wav, edited_body_music,
+                    result["body_duration"], result.get("output_speech_intervals") or [], payload, music_profile
+                )
+                music_result = {
+                    "source": "procedural_original_synth",
+                    "profile": music_profile.get("name", "learning_plucks"),
+                    "dynamic_sidechain": False,
+                    "speech_duck_gain": music_profile.get("duck_gain"),
+                    "normal_gain": music_profile.get("gain"),
+                }
+            body_for_branding = edited_body_music
+
+        if include_intro:
+            download_google_drive_file(INTRO_DRIVE_FILE_ID, intro_raw, label="KP Kids intro")
+            normalize_intro(intro_raw, intro_norm, target_duration=INTRO_TARGET_SECONDS)
+
+        if include_closure:
+            download_google_drive_file(CLOSURE_DRIVE_FILE_ID, closure_raw, label="KP Kids closure")
+            normalize_intro(closure_raw, closure_norm, target_duration=CLOSURE_TARGET_SECONDS)
+
+        if include_intro and include_closure:
+            prepend_intro(intro_norm, body_for_branding, body_with_intro,
+                          xfade_dur=result["transition_plan"]["intro_xfade"])
+            append_closure(body_with_intro, closure_norm, Path(args.output),
+                           xfade_dur=result["transition_plan"]["closure_xfade"])
+        elif include_intro:
+            prepend_intro(intro_norm, body_for_branding, Path(args.output),
+                          xfade_dur=result["transition_plan"]["intro_xfade"])
+        elif include_closure:
+            append_closure(body_for_branding, closure_norm, Path(args.output),
+                           xfade_dur=result["transition_plan"]["closure_xfade"])
+        else:
+            shutil.copyfile(body_for_branding, Path(args.output))
+
+    meta = dict(payload)
+    meta["editor_version"] = EDITOR_VERSION
+    meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
+    meta["pacing_mode"] = "silence_aware_variable_speed_target_0.90x"
+    meta["approved_body_playback_speed"] = SHORT_PLAYBACK_SPEED
+    meta["story_qa_enabled"] = False
+    meta["story_repair_enabled"] = False
+    meta["generation_triggered"] = False
+    meta["editorial_style"] = result["editorial_style"]
+    meta["edit_plan"] = result["edit_plan"]
+    meta["timing_plan"] = result["timing_plan"]
+    meta["transition_plan"] = result["transition_plan"]
+    meta["pacing_plan"] = result["pacing_plan"]
+    meta["source_silence_intervals"] = result["source_silence_intervals"]
+    meta["output_silence_intervals"] = result["output_silence_intervals"]
+    meta["output_speech_intervals"] = result["output_speech_intervals"]
+    meta["color_plan"] = result["color_plan"]
+    meta["audio_plan"] = result["audio_plan"]
+    meta["motion_typography_plan"] = result["motion_typography_plan"]
+    meta["motion_graphics_plan"] = result["motion_graphics_plan"]
+    meta["edit_theme"] = result["theme"]
+    meta["source_video_info"] = result["source_info"]
+    meta["body_duration_after_speed"] = result["body_duration"]
+    meta["intro_target_seconds"] = INTRO_TARGET_SECONDS
+    meta["closure_target_seconds"] = CLOSURE_TARGET_SECONDS
+    meta["minimum_brand_clip_seconds"] = MIN_BRAND_CLIP_SECONDS
+    meta["edit_variant"] = edit_variant
+    meta["intro_drive_file_id"] = INTRO_DRIVE_FILE_ID
+    meta["intro_prepend_enabled"] = include_intro
+    meta["closure_drive_file_id"] = CLOSURE_DRIVE_FILE_ID
+    meta["closure_append_enabled"] = include_closure
+    meta["music_bed_enabled"] = music_bed_enabled
+    meta["music_library_enabled"] = music_library_enabled
+    meta["music_bed_source"] = (music_result or {}).get("source", "disabled") if music_bed_enabled else "disabled"
+    meta["music_result"] = music_result if music_bed_enabled else {"source": "disabled"}
+    try:
+        meta["music_profile"] = music_profile if music_profile is not None else _music_profile(payload)
+    except Exception:
+        meta["music_profile"] = {}
+    try:
+        meta["final_output_info"] = ffprobe_video_info(Path(args.output))
+    except Exception as e:
+        meta["final_output_info"] = {"probe_error": str(e)}
+    Path("edit_result.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    if not isinstance(clips, list) or not clips:
-        raise RuntimeError("Long-video payload contains no clips")
-
-    work = Path(tempfile.mkdtemp(prefix="kp_kids_long_"))
-    print("Workdir:", work, flush=True)
-    normalized = []
-    used = []
-    failed = []
-
-    for idx, clip in enumerate(clips, start=1):
-        raw = work / f"clip_{idx:02d}_raw.mp4"
-        ok = False
-        drive_id = str(clip.get("drive_file_id") or "").strip()
-        url = str(clip.get("video_url") or "").strip().replace("^=", "")
-        if drive_id and raw_proxy_base_url and raw_proxy_token:
-            try:
-                download_via_n8n_proxy(raw_proxy_base_url, raw_proxy_token, drive_id, raw, label=f"RAW clip {idx} via n8n")
-                ok = True
-            except Exception as e:
-                print(f"Clip {idx}: n8n Drive proxy failed: {e}", flush=True)
-        if drive_id and not ok:
-            try:
-                download_google_drive_file(drive_id, raw, label=f"RAW clip {idx}")
-                ok = True
-            except Exception as e:
-                print(f"Clip {idx}: public Drive failed: {e}", flush=True)
-        if not ok and url:
-            try:
-                download(url, raw, label=f"RAW clip {idx} URL")
-                ok = True
-            except Exception as e:
-                print(f"Clip {idx}: URL failed: {e}", flush=True)
-        if not ok:
-            failed.append({"short_id": clip.get("short_id", ""), "title": clip.get("title", ""), "reason": "download_failed"})
-            continue
-
-        norm = work / f"clip_{idx:02d}_landscape.mp4"
-        try:
-            side_graphics_enabled = payload_bool(payload, "side_graphics_enabled", True)
-            smart_pacing_enabled = payload_bool(payload, "smart_pacing_enabled", True)
-            qa_sync_enabled = payload_bool(payload, "qa_sync_enabled", True)
-            smart_landscape_recut_enabled = payload_bool(payload, "smart_landscape_recut_enabled", True)
-            dur, graphic_meta, pacing_meta = normalize_vertical_clip(
-                raw, norm, clip=clip, clip_index=idx, clip_total=len(clips),
-                side_graphics_enabled=side_graphics_enabled,
-                smart_pacing_enabled=smart_pacing_enabled,
-                qa_sync_enabled=qa_sync_enabled,
-                smart_landscape_recut_enabled=smart_landscape_recut_enabled
-            )
-            normalized.append(norm)
-            used.append({
-                "short_id": str(clip.get("short_id") or ""),
-                "title": sanitize_text(clip.get("title")),
-                "category": str(clip.get("category") or ""),
-                "duration": round(dur, 3),
-                "side_graphics": graphic_meta,
-                "pacing": pacing_meta,
-            })
-        except Exception as e:
-            print(f"Clip {idx}: normalize failed: {e}", flush=True)
-            failed.append({"short_id": clip.get("short_id", ""), "title": clip.get("title", ""), "reason": "normalize_failed"})
-
-    if len(normalized) < 3:
-        raise RuntimeError(f"Need at least 3 usable clips for a long video; got {len(normalized)}")
-
-    body_no_music = work / "body_no_music.mp4"
-    concat_files(normalized, body_no_music)
-
-    profile = choose_music_profile(payload, clips)
-    body = work / "body_with_music.mp4"
-    music_result = mix_music(body_no_music, body, profile, str(payload.get("long_id") or payload.get("title") or "kp-kids-long"))
-
-    final_parts = []
-    brand_meta = {
-        "include_intro": include_intro,
-        "include_closure": include_closure,
-        "intro_drive_file_id": intro_drive_file_id if include_intro else "",
-        "closure_drive_file_id": closure_drive_file_id if include_closure else "",
-        "intro_source_dimensions": "",
-        "closure_source_dimensions": "",
-    }
-
-    if include_intro:
-        intro_raw = work / "intro_raw.mp4"
-        intro_norm = work / "intro_norm.mp4"
-        if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(
-                raw_proxy_base_url, raw_proxy_token, intro_drive_file_id,
-                intro_raw, label="Dedicated LANDSCAPE intro via n8n"
-            )
-        else:
-            download_google_drive_file(
-                intro_drive_file_id, intro_raw, label="Dedicated LANDSCAPE intro"
-            )
-        iw, ih = assert_landscape_brand_clip(intro_raw, "Long intro")
-        brand_meta["intro_source_dimensions"] = f"{iw}x{ih}"
-        normalize_brand_clip(intro_raw, intro_norm)
-        final_parts.append(intro_norm)
-
-    final_parts.append(body)
-
-    if include_closure:
-        closure_raw = work / "closure_raw.mp4"
-        closure_norm = work / "closure_norm.mp4"
-        if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(
-                raw_proxy_base_url, raw_proxy_token, closure_drive_file_id,
-                closure_raw, label="Dedicated LANDSCAPE closure via n8n"
-            )
-        else:
-            download_google_drive_file(
-                closure_drive_file_id, closure_raw, label="Dedicated LANDSCAPE closure"
-            )
-        cw, ch = assert_landscape_brand_clip(closure_raw, "Long closure")
-        brand_meta["closure_source_dimensions"] = f"{cw}x{ch}"
-        normalize_brand_clip(closure_raw, closure_norm)
-        final_parts.append(closure_norm)
-
-    concat_tmp = work / "final_concat.mp4"
-    concat_files(final_parts, concat_tmp)
-
-    # Final delivery pass keeps size reasonable for Telegram preview while remaining 1080p.
-    run([
-        "ffmpeg", "-y", "-i", str(concat_tmp),
-        "-c:v", "libx264", "-preset", "medium",
-        "-b:v", VIDEO_BITRATE, "-maxrate", VIDEO_MAXRATE, "-bufsize", VIDEO_BUFSIZE,
-        "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
-        "-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
-        "-movflags", "+faststart", args.output
-    ])
-
-    result = {
-        "editor_version": EDITOR_VERSION,
-        "long_id": str(payload.get("long_id") or ""),
-        "title": str(payload.get("title") or "KP Kids Long Video"),
-        "output_file": Path(args.output).name,
-        "duration_seconds": round(ffprobe_duration(args.output), 3),
-        "resolution": f"{OUTPUT_W}x{OUTPUT_H}",
-        "fps": OUTPUT_FPS,
-        "clips_requested": len(clips),
-        "clips_used": used,
-        "clip_short_ids": [u["short_id"] for u in used if u["short_id"]],
-        "clips_failed": failed,
-        "music_result": music_result,
-        "side_graphics_enabled": payload_bool(payload, "side_graphics_enabled", True) and not payload_bool(payload, "smart_landscape_recut_enabled", True),
-        "side_graphics_style": "suppressed in Smart Landscape Recut to keep characters/lesson unobstructed" if payload_bool(payload, "smart_landscape_recut_enabled", True) else "category left + spoken question/answer right",
-        "smart_pacing_enabled": payload_bool(payload, "smart_pacing_enabled", True),
-        "smart_landscape_recut_enabled": payload_bool(payload, "smart_landscape_recut_enabled", True),
-        "landscape_recut_style": "large 4:3 focus window + smooth character-to-lesson vertical pan + blurred side fill",
-        "qa_sync_enabled": payload_bool(payload, "qa_sync_enabled", True),
-        "pacing_mode": "silence-aware variable speed targeting 0.90x body pace",
-        "approved_body_playback_speed": LONG_BODY_TARGET_SPEED,
-        "branding": brand_meta,
-        "intro_drive_file_id": intro_drive_file_id if include_intro else "",
-        "closure_drive_file_id": closure_drive_file_id if include_closure else "",
-    }
-    Path(args.meta_out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":
