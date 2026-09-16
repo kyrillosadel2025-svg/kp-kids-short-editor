@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor FULL MONTAGE: pacing, typography, transitions, audio polish, optional music — NO QA / NO STORY REPAIR
+# KP Kids Short Editor FULL MONTAGE: pacing, typography, transitions, audio polish, music bed — NO QA / NO STORY REPAIR
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -2089,11 +2089,7 @@ def append_closure(body_with_intro, closure, output, xfade_dur=0.42):
 
 
 def edit_video(src, out, payload):
-    """Render the full KP Kids montage without semantic QA or story repair.
-
-    The RAW story order is preserved exactly. The editor only applies presentation polish:
-    smart pacing, typography, light camera treatment, color/audio normalization and transitions.
-    """
+    """Render the full KP Kids montage without semantic QA or story repair. The RAW story order is preserved exactly. The editor only applies presentation polish: smart pacing, typography, light camera treatment, color/audio normalization and transitions. """
     info = ffprobe_video_info(src)
     source_duration = min(15.0, info["duration"] or 15.0)
     silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
@@ -2209,9 +2205,9 @@ def main():
         download(source_url, src)
         result = edit_video(src, edited_body, payload)
 
-        # Keep the full music engine available, but OFF by default because the
-        # generated RAW normally already contains dialogue + music.
-        music_bed_enabled = payload_bool("music_bed_enabled", False)
+        # Short montage uses the same music-bed approach as the Long builder.
+        # Payload can still explicitly disable it if ever needed.
+        music_bed_enabled = payload_bool("music_bed_enabled", True)
         music_library_enabled = payload_bool("music_library_enabled", True)
         body_for_branding = edited_body
         music_profile = None
