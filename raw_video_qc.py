@@ -885,6 +885,14 @@ Be conservative. If clean source boundaries are not trustworthy, do NOT create a
         # The child is invited to answer at the wrong point and the beats cannot be
         # cleanly separated. Shipping it wastes the interaction, so hold it.
         blocking, block_reason = True, "story_beat_order_violates_contract:" + str(order_report.get("reason"))
+    elif (not repair_valid) and contract == "interaction_first" and order_report.get("status") not in {"ORDER_OK", "ORDER_REPAIRABLE"}:
+        # This format's whole value depends on CHILD_TURN landing before REVEAL.
+        # audit_story_order() needs >=2 labeled, timestamped beats to check that -
+        # if the model's story_segments came back empty/too-sparse, the order was
+        # NEVER actually verified. Silently shipping here is exactly the bug this
+        # audit exists to catch (a QA pass that says nothing wrong, and nothing
+        # right either), so hold for a QA retry instead of assuming it's fine.
+        blocking, block_reason = True, "beat_order_not_verifiable:" + str(order_report.get("reason"))
     else:
         blocking, block_reason = False, ""
 
