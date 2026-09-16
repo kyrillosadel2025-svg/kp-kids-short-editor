@@ -39,6 +39,13 @@ import urllib.error
 import urllib.parse
 from pathlib import Path
 
+# Shared with raw_video_qc.py: one definition of story order for the whole pipeline.
+from story_contract import (
+    STORY_CONTRACTS, DEFAULT_CONTRACT, contract_order_map,
+    resolve_story_contract, resolve_reveal_mode,
+    normalize_story_label as _normalize_story_label,
+)
+
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
@@ -52,7 +59,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V14 Story Gate + Verified Semantic Repair + Spoiler Guard"
+EDITOR_VERSION = "V15 Story Contracts + Beat-Order Repair + Spoiler Guard"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1054,29 +1061,6 @@ class StoryBlock(Exception):
             "story_telemetry": self.telemetry,
         }
 
-_STORY_LABEL_ALIASES = {
-    "OPENING": "HOOK", "INTRO": "HOOK", "HOOK": "HOOK",
-    "QUESTION": "QUESTION", "ASK": "QUESTION", "CHALLENGE": "QUESTION",
-    "THINK": "THINK", "THINKING": "THINK", "PAUSE": "THINK", "COUNTDOWN": "THINK",
-    "REVEAL": "REVEAL", "ANSWER": "REVEAL", "RESULT": "REVEAL", "SOLUTION": "REVEAL",
-    "REINFORCE": "REINFORCE", "REINFORCEMENT": "REINFORCE", "EXPLAIN": "REINFORCE",
-    "CHILD_TURN": "CHILD_TURN", "CHILD TURN": "CHILD_TURN", "INTERACTION": "CHILD_TURN",
-    "YOUR_TURN": "CHILD_TURN", "YOUR TURN": "CHILD_TURN", "INVITE": "CHILD_TURN",
-    "PAYOFF": "PAYOFF", "REWARD": "PAYOFF", "CLOSING": "PAYOFF", "OUTRO": "PAYOFF",
-}
-_STORY_CANONICAL_ORDER = {
-    "HOOK": 0, "QUESTION": 1, "THINK": 2, "REVEAL": 3,
-    "REINFORCE": 4, "CHILD_TURN": 5, "PAYOFF": 6,
-}
-
-def _normalize_story_label(value):
-    s = str(value or "").strip().upper().replace("-", "_")
-    s = re.sub(r"\s+", " ", s)
-    if s in _STORY_LABEL_ALIASES:
-        return _STORY_LABEL_ALIASES[s]
-    s2 = s.replace(" ", "_")
-    return _STORY_LABEL_ALIASES.get(s2, s2)
-
 def _semantic_story_from_payload(payload):
     candidates = [
         payload.get("qa_semantic_story"),
@@ -1128,11 +1112,21 @@ def validate_semantic_repair_plan(payload, source_duration):
     if status in {"UNCERTAIN", "ERROR", ""}:
         report["reason"] = "repair_requires_explicit_early_reveal_movable_status"
         return report
-    if status == "CORRECT_REVEAL":
+    repair_kind = str(plan.get("repair_kind") or "reveal_order").lower()
+    report["repair_kind"] = repair_kind
+    if status == "CORRECT_REVEAL" and repair_kind != "beat_order":
+        # The reveal is on time, so there is no reveal to move. A beat_order plan
+        # is still legitimate here: it fixes an interaction that lands after the
+        # answer, which is a different defect from an early reveal.
         report["reason"] = "story_order_already_correct_no_repair_needed"
         return report
-    if status != "EARLY_REVEAL_MOVABLE":
-        report["reason"] = f"unknown_semantic_status_{status.lower()}"
+    # An early-reveal repair requires the movable classification. A beat-order
+    # repair is also allowed on a video whose reveal was judged correct.
+    allowed_status = {"EARLY_REVEAL_MOVABLE"}
+    if repair_kind == "beat_order":
+        allowed_status.add("CORRECT_REVEAL")
+    if status not in allowed_status:
+        report["reason"] = f"repair_kind_{repair_kind}_not_allowed_for_status_{status.lower()}"
         return report
     if source_duration <= 0:
         report["reason"] = "source_duration_unknown"
@@ -1199,11 +1193,22 @@ def validate_semantic_repair_plan(payload, source_duration):
         report["reason"] = "repair_plan_still_places_reveal_before_question"
         return report
 
-    # The whole output must read as a story, not just question-before-reveal.
-    known = [_STORY_CANONICAL_ORDER[l] for l in labels if l in _STORY_CANONICAL_ORDER]
+    # The whole output must read as a story under THIS episode's contract.
+    # A find-it episode must place CHILD_TURN before REVEAL; a teaching episode
+    # places it after. One hardcoded order is what let "your turn" land after
+    # the character had already pointed at the answer.
+    contract, contract_reason = resolve_story_contract(payload)
+    report["contract"] = contract
+    report["contract_reason"] = contract_reason
+    order_map = contract_order_map(contract)
+    known = [order_map[l] for l in labels if l in order_map]
     if any(nxt < cur for cur, nxt in zip(known, known[1:])):
-        report["reason"] = "repair_plan_violates_canonical_story_order"
+        report["reason"] = f"repair_plan_violates_{contract}_contract"
         return report
+    if contract == "interaction_first" and "CHILD_TURN" in labels:
+        if labels.index("CHILD_TURN") >= labels.index("REVEAL"):
+            report["reason"] = "interaction_first_requires_child_turn_before_reveal"
+            return report
 
     # Do not accept overlapping source cuts: overlap duplicates dialogue.
     # V13 tolerated 40ms of overlap, which is audible on a plosive. V14 allows 5ms.
@@ -1236,7 +1241,7 @@ def apply_semantic_story_repair(source_path, dest_path, repair_report):
     mapped = []
     for i, seg in enumerate(segments):
         a, b = seg["source_start"], seg["source_end"]
-        fc.append(f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v{i}]")
+        fc.append(f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v{i}]")
         concat_inputs.append(f"[v{i}]")
         if info["has_audio"]:
             fc.append(f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a{i}]")
@@ -1366,11 +1371,11 @@ def apply_story_reorder(source_path, dest_path, story_plan):
     if not (0.05 < a < b < d-0.05): return False
     if info["has_audio"]:
         fc = (
-            f"[0:v]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
+            f"[0:v:0]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
             f"[0:a]atrim=0:{a:.6f},asetpts=PTS-STARTPTS[a0];"
-            f"[0:v]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
+            f"[0:v:0]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
             f"[0:a]atrim={b:.6f}:{d:.6f},asetpts=PTS-STARTPTS[a1];"
-            f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
+            f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
             f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a2];"
             "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"
         )
@@ -1379,9 +1384,9 @@ def apply_story_reorder(source_path, dest_path, story_plan):
                "-c:a","aac","-b:a","192k","-movflags","+faststart",str(dest_path)]
     else:
         fc = (
-            f"[0:v]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
-            f"[0:v]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
-            f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
+            f"[0:v:0]trim=0:{a:.6f},setpts=PTS-STARTPTS[v0];"
+            f"[0:v:0]trim={b:.6f}:{d:.6f},setpts=PTS-STARTPTS[v1];"
+            f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v2];"
             "[v0][v1][v2]concat=n=3:v=1:a=0[v]"
         )
         cmd = ["ffmpeg","-y","-hide_banner","-i",str(source_path),"-filter_complex",fc,
@@ -1603,14 +1608,14 @@ def build_transition_plan(edit_plan):
 def build_paced_video_prefix(pacing_plan):
     segs = pacing_plan.get("segments") or []
     if not segs:
-        return f"[0:v]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f}[pacedv];"
+        return f"[0:v:0]setpts=PTS/{SHORT_PLAYBACK_SPEED:.5f}[pacedv];"
     parts = []
     labels = []
     for i, seg in enumerate(segs):
         label = f"pv{i}"
         labels.append(f"[{label}]")
         parts.append(
-            f"[0:v]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
+            f"[0:v:0]trim=start={seg['source_start']:.6f}:end={seg['source_end']:.6f},"
             f"setpts=(PTS-STARTPTS)/{seg['speed']:.6f},settb=AVTB[{label}];"
         )
     parts.append("".join(labels) + f"concat=n={len(segs)}:v=1:a=0[pacedv];")
@@ -2534,7 +2539,7 @@ def prepend_intro(intro, body, output, xfade_dur=0.28):
     cmd = [
         "ffmpeg", "-y", "-i", str(intro), "-i", str(body),
         "-filter_complex",
-        f"[0:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
+        f"[0:v:0]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
         f"[1:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v1];"
         f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
@@ -2562,7 +2567,7 @@ def append_closure(body_with_intro, closure, output, xfade_dur=0.42):
     cmd = [
         "ffmpeg", "-y", "-i", str(body_with_intro), "-i", str(closure),
         "-filter_complex",
-        f"[0:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
+        f"[0:v:0]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v0];"
         f"[1:v]setpts=PTS-STARTPTS,fps={OUTPUT_FPS},settb=expr=1/{OUTPUT_FPS}[v1];"
         f"[v0][v1]xfade=transition=fade:duration={xfade_dur:.3f}:offset={offset:.3f}[vout];"
         "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];"
