@@ -155,6 +155,24 @@ def contract_order_map(contract):
     return {label: i for i, label in enumerate(beats)}
 
 
+def required_beats_for_audit(contract, payload):
+    """Beats the order audit cannot safely skip for this episode.
+
+    The audit only ever compares PAIRS of beats it was actually given. If
+    Vision never labels a beat at all - CHILD_TURN is the classic case,
+    since it is often a gesture/smile with no isolated "your turn" line -
+    the audit has nothing to compare it against and silently reports
+    ORDER_OK, even though the one beat it is missing is exactly the one the
+    contract exists to protect. This makes that failure mode explicit
+    instead of invisible.
+    """
+    required = {"QUESTION", "REVEAL"}
+    has_invite = bool(payload.get("interaction_type") or payload.get("challenge_line"))
+    if contract == "interaction_first" or has_invite:
+        required.add("CHILD_TURN")
+    return required
+
+
 def contract_rule_text(contract):
     beats = STORY_CONTRACTS.get(contract, STORY_CONTRACTS[DEFAULT_CONTRACT])
     return " -> ".join(beats)
@@ -246,6 +264,32 @@ def audit_story_order(story_segments, payload, duration, silences=None):
     report["source_order"] = [b["label"] for b in beats]
 
     known = [b for b in beats if b["label"] in order_map]
+
+    # --- is a beat the contract depends on simply missing from the report? ----
+    # This must run BEFORE the pairwise comparison below: two known beats can
+    # look perfectly ordered relative to EACH OTHER while the beat that would
+    # have exposed the real defect (e.g. CHILD_TURN landing after REVEAL) was
+    # never labelled at all, so it never enters the comparison.
+    #
+    # Only flag it once we have evidence the video got PAST where that beat
+    # belongs - i.e. some later-contract-order beat was identified. Without
+    # that, Vision simply has not described that part of the video yet, which
+    # is a normal partial report, not a missing beat.
+    required = required_beats_for_audit(contract, payload)
+    present = {b["label"] for b in known}
+    present_orders = {order_map[label] for label in present if label in order_map}
+    missing_required = sorted(
+        label for label in required
+        if label not in present
+        and any(o > order_map[label] for o in present_orders)
+    )
+    if missing_required:
+        report.update(
+            status="ORDER_UNKNOWN",
+            reason="required_beat_not_identified:" + ",".join(missing_required),
+        )
+        return report
+
     if len(known) < 2:
         report["reason"] = "no_contract_beats_identified"
         return report
