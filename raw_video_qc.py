@@ -4,6 +4,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Shared with the editor so QA can never approve an order the editor rejects.
+from story_contract import (
+    STORY_LABEL_ALIASES, STORY_CONTRACTS, DEFAULT_CONTRACT,
+    REPAIR_MIN_CONFIDENCE, SEGMENT_MIN_SECONDS, SEGMENT_MAX_COUNT,
+    SEGMENT_OVERLAP_EPSILON,
+    normalize_story_label, resolve_story_contract, resolve_reveal_mode,
+    contract_order_map, contract_rule_text, audit_story_order,
+)
+
 def run(cmd, check=True):
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
@@ -265,36 +274,6 @@ def _kie_chat_output_text(obj):
 
 
 
-STORY_LABEL_ALIASES = {
-    "OPENING": "HOOK", "INTRO": "HOOK", "HOOK": "HOOK", "TEASER": "HOOK",
-    "QUESTION": "QUESTION", "ASK": "QUESTION", "CHALLENGE": "QUESTION", "PROMPT": "QUESTION",
-    "THINK": "THINK", "THINKING": "THINK", "PAUSE": "THINK", "COUNTDOWN": "THINK", "WAIT": "THINK",
-    "REVEAL": "REVEAL", "ANSWER": "REVEAL", "RESULT": "REVEAL", "SOLUTION": "REVEAL",
-    "ANSWER_REVEAL": "REVEAL", "REVEAL_ANSWER": "REVEAL",
-    "REINFORCE": "REINFORCE", "REINFORCEMENT": "REINFORCE", "EXPLAIN": "REINFORCE", "RECAP": "REINFORCE",
-    "CHILD_TURN": "CHILD_TURN", "CHILD TURN": "CHILD_TURN", "INTERACTION": "CHILD_TURN",
-    "YOUR_TURN": "CHILD_TURN", "YOUR TURN": "CHILD_TURN", "INVITE": "CHILD_TURN", "CTA": "CHILD_TURN",
-    "PAYOFF": "PAYOFF", "REWARD": "PAYOFF", "CLOSING": "PAYOFF", "OUTRO": "PAYOFF", "CELEBRATION": "PAYOFF",
-}
-STORY_CANONICAL_ORDER = {
-    "HOOK": 0, "QUESTION": 1, "THINK": 2, "REVEAL": 3,
-    "REINFORCE": 4, "CHILD_TURN": 5, "PAYOFF": 6,
-}
-REPAIR_MIN_CONFIDENCE = 0.82
-SEGMENT_MIN_SECONDS = 0.18
-SEGMENT_MAX_COUNT = 10
-SEGMENT_OVERLAP_EPSILON = 0.005
-
-
-def normalize_story_label(value):
-    s = str(value or "").strip().upper().replace("-", "_")
-    s = re.sub(r"\s+", " ", s)
-    if s in STORY_LABEL_ALIASES:
-        return STORY_LABEL_ALIASES[s]
-    s2 = s.replace(" ", "_")
-    return STORY_LABEL_ALIASES.get(s2, s2)
-
-
 def _seg_float(value):
     try:
         return float(value)
@@ -321,7 +300,7 @@ def summarize_story_order(segments):
     return rows
 
 
-def validate_repair_plan(plan, source_duration, fallback_confidence=None):
+def validate_repair_plan(plan, source_duration, fallback_confidence=None, contract=DEFAULT_CONTRACT):
     """Strictly validate a reorder plan before the editor is ever allowed to cut.
 
     Returns (ok, reason, segments, confidence). Every rejection is explicit so
@@ -383,10 +362,13 @@ def validate_repair_plan(plan, source_duration, fallback_confidence=None):
     if labels.index("QUESTION") >= labels.index("REVEAL"):
         return False, "plan_still_places_reveal_before_question", [], conf
 
-    # Canonical beat order must not regress (HOOK -> QUESTION -> THINK -> REVEAL -> ...).
-    known = [STORY_CANONICAL_ORDER[l] for l in labels if l in STORY_CANONICAL_ORDER]
+    # Beat order must follow THIS episode's contract. A find-it episode puts the
+    # child's turn BEFORE the reveal; a teaching episode puts it after. Enforcing
+    # one hardcoded order is what let "point at it" land after the answer.
+    order_map = contract_order_map(contract)
+    known = [order_map[l] for l in labels if l in order_map]
     if any(b < a for a, b in zip(known, known[1:])):
-        return False, "plan_output_order_violates_canonical_story_order", [], conf
+        return False, f"plan_output_order_violates_{contract}_contract", [], conf
 
     # No overlapping source ranges: overlap means duplicated dialogue.
     by_source = sorted(cleaned, key=lambda x: x["source_start"])
@@ -539,7 +521,7 @@ def _normalize_kie_verdict(verdict):
         "provider_shape": "reveal_assessment" if "reveal_assessment" in verdict else "direct",
     }
 
-def semantic_story_qa(path, payload, duration):
+def semantic_story_qa(path, payload, duration, silences=None):
     """Semantic story QA using KIE Gemini multimodal chat.
 
     KIE documents Gemini 2.5 Flash's OpenAI-compatible chat endpoint as accepting
@@ -607,6 +589,23 @@ def semantic_story_qa(path, payload, duration):
     if reveal_time not in (None, ""):
         timing_hint = f"approximately {reveal_time} seconds"
 
+    contract, contract_reason = resolve_story_contract(payload)
+    reveal_mode, reveal_mode_reason = resolve_reveal_mode(payload)
+    if reveal_mode == "gesture":
+        reveal_rule = (
+            "This episode's answer object is SUPPOSED to be on screen the whole time "
+            "(the child has to find it among other things). Its mere presence is NOT a spoiler.\n"
+            "The reveal is the ACT of identifying it: pointing at it, touching or picking it up, "
+            "leaning toward it, circling or highlighting it, looking straight at it and holding that look, "
+            "or naming it out loud. Judge ONLY that act."
+        )
+    else:
+        reveal_rule = (
+            "The correct answer must NOT be visible, identifiable, readable, named on screen, reflected, "
+            "silhouetted, held by a character, highlighted, or otherwise disclosed BEFORE the intended "
+            "ANSWER/REVEAL moment."
+        )
+
     prompt = f"""You are the semantic story editor/QA for a 15-second KP Kids preschool video.
 Watch the FULL VIDEO chronologically and use BOTH the visible video and spoken dialogue when available.
 
@@ -619,9 +618,19 @@ Start policy: {payload.get('start_policy','withhold-result')}
 Dialogue timeline: {payload.get('dialogue_timeline','')}
 Video duration: {duration:.2f}s
 
+Reveal mode: {reveal_mode} ({reveal_mode_reason})
+Story contract: {contract} ({contract_reason})
+Required beat order for this episode: {contract_rule_text(contract)}
+
 NON-NEGOTIABLE STORY RULE:
-The correct answer must NOT be visible, identifiable, readable, named on screen, reflected, silhouetted, held by a character, highlighted, or otherwise disclosed BEFORE the intended ANSWER/REVEAL moment.
+{reveal_rule}
 The cutoff is the ANSWER/REVEAL moment, NOT the question moment.
+
+SECOND, EQUALLY IMPORTANT RULE - THE CHILD'S TURN:
+If this episode invites the child to answer ("your turn", "point at it", "say it with me"),
+that invitation is only worth anything if it comes BEFORE the character answers.
+An invitation placed after the answer is a real defect even when the reveal itself was on time.
+Label that invitation CHILD_TURN and timestamp it accurately.
 
 First classify the reveal:
 - CORRECT_REVEAL: answer is withheld until the intended reveal.
@@ -632,12 +641,16 @@ First classify the reveal:
 Then identify story beats with timestamps whenever they are clear:
 HOOK, QUESTION, THINK, REVEAL, REINFORCE, CHILD_TURN, PAYOFF.
 
+Timestamp EVERY beat you can identify, even when the reveal itself is correct. The
+editor rebuilds story order from these timestamps, so their accuracy matters more
+than the repair_plan below.
+
 If and ONLY IF status is EARLY_REVEAL_MOVABLE, create a conservative repair_plan:
 - action must be "reorder_segments".
 - confidence 0..1.
 - output_segments must be the exact SOURCE ranges to keep, in the desired OUTPUT order.
 - Every output segment needs: label, start_sec, end_sec, order.
-- QUESTION must come before THINK (if present), then REVEAL, then CHILD_TURN/PAYOFF.
+- The output order must follow this episode's contract exactly: {contract_rule_text(contract)}.
 - Never overlap source ranges.
 - Preserve dialogue/audio with each segment.
 - Do not invent missing footage.
@@ -838,8 +851,27 @@ Be conservative. If clean source boundaries are not trustworthy, do NOT create a
     repair_conf = 0.0
     if status == "EARLY_REVEAL_MOVABLE":
         repair_valid, repair_reason, repair_segments, repair_conf = validate_repair_plan(
-            repair_plan, duration, fallback_confidence=conf
+            repair_plan, duration, fallback_confidence=conf, contract=contract
         )
+
+    # ---- Beat-order audit ----------------------------------------------------
+    # Reveal safety and beat order are INDEPENDENT failures. A video can hide its
+    # answer perfectly (CORRECT_REVEAL) and still invite the child to answer after
+    # the character already answered. That is what this audit catches, and it
+    # builds its own plan from the model's beat timestamps rather than trusting
+    # the model to produce an edit decision list.
+    order_report = audit_story_order(story_segments, payload, duration, silences or [])
+    if not repair_valid and order_report.get("status") == "ORDER_REPAIRABLE":
+        ok, why, segs, oconf = validate_repair_plan(
+            order_report["repair_plan"], duration,
+            fallback_confidence=order_report.get("confidence"), contract=contract,
+        )
+        if ok:
+            repair_valid, repair_reason, repair_segments, repair_conf = True, "beat_order_repair_planned_locally", segs, oconf
+            repair_plan = order_report["repair_plan"]
+        else:
+            order_report["status"] = "ORDER_UNREPAIRABLE"
+            order_report["reason"] = "locally_planned_reorder_failed_validation:" + why
 
     # Persistent reveal always blocks. UNCERTAIN always holds for review.
     # A movable reveal passes only with a machine-verified high-confidence plan.
@@ -849,6 +881,10 @@ Be conservative. If clean source boundaries are not trustworthy, do NOT create a
         blocking, block_reason = True, "story_status_uncertain_hold_for_human_review"
     elif status == "EARLY_REVEAL_MOVABLE" and not repair_valid:
         blocking, block_reason = True, f"early_reveal_without_safe_plan:{repair_reason}"
+    elif order_report.get("status") == "ORDER_UNREPAIRABLE":
+        # The child is invited to answer at the wrong point and the beats cannot be
+        # cleanly separated. Shipping it wastes the interaction, so hold it.
+        blocking, block_reason = True, "story_beat_order_violates_contract:" + str(order_report.get("reason"))
     else:
         blocking, block_reason = False, ""
 
@@ -879,9 +915,20 @@ Be conservative. If clean source boundaries are not trustworthy, do NOT create a
         "repair_validation_reason": repair_reason,
         "repair_plan": {
             "action": "reorder_segments",
+            # reveal_order: the answer was disclosed too early.
+            # beat_order:  the reveal was fine but the beats are out of contract
+            #              order (typically the child's turn placed after the answer).
+            "repair_kind": repair_plan.get("repair_kind", "reveal_order"),
+            "contract": contract,
             "confidence": round(repair_conf, 3),
             "output_segments": repair_segments,
         } if repair_valid else {},
+        "story_contract": contract,
+        "story_contract_reason": contract_reason,
+        "story_contract_order": STORY_CONTRACTS[contract],
+        "reveal_mode": reveal_mode,
+        "reveal_mode_reason": reveal_mode_reason,
+        "beat_order_audit": order_report,
         "story_segments": story_segments,
         "original_story_order": [x["label"] for x in original_order],
         "original_story_segments": original_order,
@@ -956,7 +1003,7 @@ def analyze(path, payload):
         if mean_db is not None and mean_db < -30.0:
             issues.append({"code":"AUDIO_TOO_QUIET","detail":f"Mean {mean_db:.1f} dB"})
 
-    semantic = semantic_story_qa(path, payload, duration)
+    semantic = semantic_story_qa(path, payload, duration, silences)
     sem_status = str(semantic.get("status") or "UNCERTAIN").upper()
     technical_hold = False
     if sem_status == "ERROR":
@@ -994,6 +1041,29 @@ def analyze(path, payload):
             "detail":semantic.get("reason","Semantic story QA did not run")
         })
 
+    # Beat order is a separate axis from reveal safety: CORRECT_REVEAL can still
+    # invite the child to answer after the answer has already been given.
+    order_audit = semantic.get("beat_order_audit") or {}
+    order_status = str(order_audit.get("status") or "").upper()
+    if order_status == "ORDER_REPAIRABLE" and semantic.get("repair_required"):
+        warnings.append({
+            "code":"STORY_ORDER_REPAIRABLE",
+            "detail":(
+                f"Beat order breaks the {order_audit.get('contract')} contract "
+                f"({order_audit.get('source_order')} -> {order_audit.get('target_order')}); "
+                f"editor will reorder at confidence={order_audit.get('confidence')}."
+            )
+        })
+    elif order_status == "ORDER_UNREPAIRABLE":
+        issues.append({
+            "code":"STORY_ORDER_UNREPAIRABLE",
+            "detail":(
+                f"Beat order breaks the {order_audit.get('contract')} contract and cannot be "
+                f"cleanly reordered: {order_audit.get('reason')}. "
+                f"Violations: {order_audit.get('violations')}"
+            )
+        })
+
     qa_pass = len(issues) == 0
     if technical_hold:
         qa_status = "technical_hold"
@@ -1015,6 +1085,10 @@ def analyze(path, payload):
             "confidence": semantic.get("confidence"),
             "repair_required": bool(semantic.get("repair_required")),
             "repair_confidence": semantic.get("repair_confidence"),
+            "story_contract": semantic.get("story_contract"),
+            "reveal_mode": semantic.get("reveal_mode"),
+            "beat_order_status": order_audit.get("status"),
+            "beat_order_violations": order_audit.get("violations", []),
             "original_story_order": semantic.get("original_story_order", []),
             "final_story_order": semantic.get("final_story_order", []),
             "original_story_segments": semantic.get("original_story_segments", []),
