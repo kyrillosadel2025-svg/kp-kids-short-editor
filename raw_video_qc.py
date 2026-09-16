@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, base64, json, math, os, re, shutil, subprocess, tempfile, time, urllib.request, urllib.error
+import argparse, base64, hashlib, json, math, os, re, shutil, subprocess, tempfile, time, urllib.request, urllib.error
 from pathlib import Path
 import cv2
 import numpy as np
@@ -133,17 +133,52 @@ def global_zoom_metrics(path, sample_dt=0.25):
 
 
 def _json_from_model_text(text):
+    """Parse the model's JSON answer.
+
+    V8 fix: the V7 patterns were raw strings containing a doubled backslash
+    (r"^```(?:json)?\\s*"), so they searched for a LITERAL backslash instead of
+    whitespace. Fenced or prose-wrapped replies therefore never parsed, and a
+    perfectly good CORRECT_REVEAL verdict was downgraded to a hard
+    SEMANTIC_VISION_ERROR -- which in turn invited an unnecessary regeneration.
+    """
     text = str(text or "").strip()
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\\s*", "", text, flags=re.I)
-        text = re.sub(r"\\s*```$", "", text)
+        text = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+        text = text.strip()
     try:
         return json.loads(text)
     except Exception:
-        m = re.search(r"\\{.*\\}", text, re.S)
-        if not m:
-            raise RuntimeError("Vision QA returned no JSON object")
-        return json.loads(m.group(0))
+        pass
+    # Balanced-brace scan: tolerant of leading prose and trailing commentary.
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except Exception:
+                        break
+        start = text.find("{", start + 1)
+    raise RuntimeError("Vision QA returned no JSON object")
 
 
 def _kie_chat_output_text(obj):
@@ -228,6 +263,172 @@ def _kie_chat_output_text(obj):
             detail["data_msg"] = data.get("msg") or data.get("message") or data.get("error")
     raise RuntimeError("KIE non-chat response: " + json.dumps(detail, ensure_ascii=False)[:900])
 
+
+
+STORY_LABEL_ALIASES = {
+    "OPENING": "HOOK", "INTRO": "HOOK", "HOOK": "HOOK", "TEASER": "HOOK",
+    "QUESTION": "QUESTION", "ASK": "QUESTION", "CHALLENGE": "QUESTION", "PROMPT": "QUESTION",
+    "THINK": "THINK", "THINKING": "THINK", "PAUSE": "THINK", "COUNTDOWN": "THINK", "WAIT": "THINK",
+    "REVEAL": "REVEAL", "ANSWER": "REVEAL", "RESULT": "REVEAL", "SOLUTION": "REVEAL",
+    "ANSWER_REVEAL": "REVEAL", "REVEAL_ANSWER": "REVEAL",
+    "REINFORCE": "REINFORCE", "REINFORCEMENT": "REINFORCE", "EXPLAIN": "REINFORCE", "RECAP": "REINFORCE",
+    "CHILD_TURN": "CHILD_TURN", "CHILD TURN": "CHILD_TURN", "INTERACTION": "CHILD_TURN",
+    "YOUR_TURN": "CHILD_TURN", "YOUR TURN": "CHILD_TURN", "INVITE": "CHILD_TURN", "CTA": "CHILD_TURN",
+    "PAYOFF": "PAYOFF", "REWARD": "PAYOFF", "CLOSING": "PAYOFF", "OUTRO": "PAYOFF", "CELEBRATION": "PAYOFF",
+}
+STORY_CANONICAL_ORDER = {
+    "HOOK": 0, "QUESTION": 1, "THINK": 2, "REVEAL": 3,
+    "REINFORCE": 4, "CHILD_TURN": 5, "PAYOFF": 6,
+}
+REPAIR_MIN_CONFIDENCE = 0.82
+SEGMENT_MIN_SECONDS = 0.18
+SEGMENT_MAX_COUNT = 10
+SEGMENT_OVERLAP_EPSILON = 0.005
+
+
+def normalize_story_label(value):
+    s = str(value or "").strip().upper().replace("-", "_")
+    s = re.sub(r"\s+", " ", s)
+    if s in STORY_LABEL_ALIASES:
+        return STORY_LABEL_ALIASES[s]
+    s2 = s.replace(" ", "_")
+    return STORY_LABEL_ALIASES.get(s2, s2)
+
+
+def _seg_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize_story_order(segments):
+    """Chronological source order of the story beats, for telemetry."""
+    rows = []
+    for seg in segments or []:
+        if not isinstance(seg, dict):
+            continue
+        a = _seg_float(seg.get("start_sec", seg.get("start", seg.get("source_start"))))
+        b = _seg_float(seg.get("end_sec", seg.get("end", seg.get("source_end"))))
+        if a is None:
+            continue
+        rows.append({
+            "label": normalize_story_label(seg.get("label") or seg.get("phase") or seg.get("type")),
+            "source_start": round(a, 4),
+            "source_end": round(b, 4) if b is not None else None,
+        })
+    rows.sort(key=lambda x: x["source_start"])
+    return rows
+
+
+def validate_repair_plan(plan, source_duration, fallback_confidence=None):
+    """Strictly validate a reorder plan before the editor is ever allowed to cut.
+
+    Returns (ok, reason, segments, confidence). Every rejection is explicit so
+    the block reason that reaches Telegram names the real defect.
+    """
+    if not isinstance(plan, dict) or not plan:
+        return False, "no_repair_plan", [], 0.0
+
+    action = str(plan.get("action") or "").strip().lower()
+    if action not in {"reorder_segments", "reorder", "move_segments"}:
+        return False, "plan_action_is_not_reorder_segments", [], 0.0
+
+    conf = _seg_float(plan.get("confidence"))
+    if conf is None:
+        conf = _seg_float(fallback_confidence)
+    if conf is None:
+        return False, "repair_plan_has_no_confidence", [], 0.0
+    conf = max(0.0, min(1.0, conf))
+    if conf < REPAIR_MIN_CONFIDENCE:
+        return False, f"repair_confidence_{conf:.2f}_below_{REPAIR_MIN_CONFIDENCE}", [], conf
+
+    raw = plan.get("output_segments")
+    if not isinstance(raw, list) or not (2 <= len(raw) <= SEGMENT_MAX_COUNT):
+        return False, "invalid_segment_count", [], conf
+
+    cleaned = []
+    for i, seg in enumerate(raw):
+        if not isinstance(seg, dict):
+            return False, f"segment_{i}_not_object", [], conf
+        label = normalize_story_label(seg.get("label") or seg.get("phase") or seg.get("type"))
+        a = _seg_float(seg.get("start_sec", seg.get("start", seg.get("source_start"))))
+        b = _seg_float(seg.get("end_sec", seg.get("end", seg.get("source_end"))))
+        if a is None or b is None:
+            return False, f"segment_{i}_missing_time", [], conf
+        if a < -0.01 or b > source_duration + 0.05:
+            return False, f"segment_{i}_out_of_source_range", [], conf
+        a = max(0.0, min(a, source_duration))
+        b = max(0.0, min(b, source_duration))
+        if b - a < SEGMENT_MIN_SECONDS:
+            return False, f"segment_{i}_shorter_than_{SEGMENT_MIN_SECONDS}s", [], conf
+        order = _seg_float(seg.get("order", seg.get("output_order", i)))
+        cleaned.append({
+            "label": label,
+            "source_start": round(a, 4),
+            "source_end": round(b, 4),
+            "order": i if order is None else order,
+            "source_index": i,
+        })
+
+    cleaned.sort(key=lambda x: (x["order"], x["source_index"]))
+    for position, seg in enumerate(cleaned):
+        seg["output_order"] = position
+
+    labels = [x["label"] for x in cleaned]
+    if "QUESTION" not in labels:
+        return False, "plan_has_no_question_segment", [], conf
+    if "REVEAL" not in labels:
+        return False, "plan_has_no_reveal_segment", [], conf
+    if labels.index("QUESTION") >= labels.index("REVEAL"):
+        return False, "plan_still_places_reveal_before_question", [], conf
+
+    # Canonical beat order must not regress (HOOK -> QUESTION -> THINK -> REVEAL -> ...).
+    known = [STORY_CANONICAL_ORDER[l] for l in labels if l in STORY_CANONICAL_ORDER]
+    if any(b < a for a, b in zip(known, known[1:])):
+        return False, "plan_output_order_violates_canonical_story_order", [], conf
+
+    # No overlapping source ranges: overlap means duplicated dialogue.
+    by_source = sorted(cleaned, key=lambda x: x["source_start"])
+    for prev, cur in zip(by_source, by_source[1:]):
+        if cur["source_start"] < prev["source_end"] - SEGMENT_OVERLAP_EPSILON:
+            return False, "plan_segments_overlap_in_source", [], conf
+
+    kept = sum(x["source_end"] - x["source_start"] for x in cleaned)
+    if kept > source_duration + 0.15:
+        return False, "plan_duration_exceeds_source", [], conf
+    if source_duration > 0 and kept < min(5.0, source_duration * 0.45):
+        return False, "plan_discards_too_much_of_story", [], conf
+
+    # Project output timestamps so downstream telemetry is exact, not guessed.
+    t = 0.0
+    for seg in cleaned:
+        span = seg["source_end"] - seg["source_start"]
+        seg["output_start"] = round(t, 4)
+        seg["output_end"] = round(t + span, 4)
+        t += span
+
+    return True, "repair_plan_valid", cleaned, conf
+
+
+def projected_event_times(segments):
+    """Where question/reveal/child-turn land in the repaired timeline."""
+    first = {}
+    for seg in segments or []:
+        first.setdefault(seg.get("label"), seg)
+
+    def cue(label):
+        seg = first.get(label)
+        if not seg:
+            return None
+        span = seg["output_end"] - seg["output_start"]
+        return round(seg["output_start"] + min(0.25, max(0.05, span * 0.15)), 4)
+
+    return {
+        "question_time": cue("QUESTION"),
+        "reveal_time": cue("REVEAL"),
+        "interaction_time": cue("CHILD_TURN"),
+    }
 
 
 def _normalize_kie_verdict(verdict):
@@ -626,40 +827,67 @@ Be conservative. If clean source boundaries are not trustworthy, do NOT create a
     except Exception:
         conf = None
 
-    explicit_early = status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"}
-    # If KIE explicitly classifies an early reveal but supplies no numerical
-    # confidence, block it rather than letting it pass because of a fabricated 0.
-    blocking = explicit_early and (conf is None or conf >= 0.72)
-
     repair_plan = verdict.get("repair_plan") if isinstance(verdict.get("repair_plan"), dict) else {}
     story_segments = verdict.get("story_segments") if isinstance(verdict.get("story_segments"), list) else []
 
+    # A reorder is considered ONLY for an explicitly movable early reveal.
+    # A plan attached to any other classification is ignored, never executed.
     repair_valid = False
-    if status == "EARLY_REVEAL_MOVABLE" and repair_plan.get("action") == "reorder_segments":
-        segs = repair_plan.get("output_segments")
-        try:
-            rconf = float(repair_plan.get("confidence", conf if conf is not None else 0.0) or 0.0)
-        except Exception:
-            rconf = 0.0
-        if isinstance(segs, list) and 2 <= len(segs) <= 10 and rconf >= 0.82:
-            labels = [str(x.get("label") or "").upper().replace("-", "_") for x in segs if isinstance(x, dict)]
-            repair_valid = "QUESTION" in labels and "REVEAL" in labels and labels.index("QUESTION") < labels.index("REVEAL")
+    repair_reason = "repair_not_applicable_for_status"
+    repair_segments = []
+    repair_conf = 0.0
+    if status == "EARLY_REVEAL_MOVABLE":
+        repair_valid, repair_reason, repair_segments, repair_conf = validate_repair_plan(
+            repair_plan, duration, fallback_confidence=conf
+        )
 
-    # Persistent reveal always blocks. A movable reveal is allowed through only
-    # when the model supplied a high-confidence, machine-verifiable repair plan.
-    blocking = (
-        status == "PERSISTENT_EARLY_REVEAL"
-        or (status == "EARLY_REVEAL_MOVABLE" and not repair_valid)
-        or status == "UNCERTAIN"
-    )
+    # Persistent reveal always blocks. UNCERTAIN always holds for review.
+    # A movable reveal passes only with a machine-verified high-confidence plan.
+    if status == "PERSISTENT_EARLY_REVEAL":
+        blocking, block_reason = True, "persistent_spoiler_cannot_be_edited_away"
+    elif status == "UNCERTAIN":
+        blocking, block_reason = True, "story_status_uncertain_hold_for_human_review"
+    elif status == "EARLY_REVEAL_MOVABLE" and not repair_valid:
+        blocking, block_reason = True, f"early_reveal_without_safe_plan:{repair_reason}"
+    else:
+        blocking, block_reason = False, ""
+
+    original_order = summarize_story_order(story_segments)
+    final_order = [
+        {
+            "label": s["label"],
+            "source_start": s["source_start"],
+            "source_end": s["source_end"],
+            "output_start": s["output_start"],
+            "output_end": s["output_end"],
+            "output_order": s["output_order"],
+        }
+        for s in repair_segments
+    ] if repair_valid else []
+    projected = projected_event_times(repair_segments) if repair_valid else {
+        "question_time": None, "reveal_time": None, "interaction_time": None
+    }
 
     return {
         "status": status,
         "confidence": round(conf, 3) if conf is not None else None,
         "blocking": blocking,
-        "repair_required": bool(status == "EARLY_REVEAL_MOVABLE" and repair_valid),
-        "repair_plan": repair_plan if repair_valid else {},
+        "block_reason": block_reason,
+        "repair_required": bool(repair_valid),
+        "repair_applied_by": "editor" if repair_valid else None,
+        "repair_confidence": round(repair_conf, 3) if repair_valid else None,
+        "repair_validation_reason": repair_reason,
+        "repair_plan": {
+            "action": "reorder_segments",
+            "confidence": round(repair_conf, 3),
+            "output_segments": repair_segments,
+        } if repair_valid else {},
         "story_segments": story_segments,
+        "original_story_order": [x["label"] for x in original_order],
+        "original_story_segments": original_order,
+        "final_story_order": [x["label"] for x in final_order],
+        "final_story_segments": final_order,
+        "projected_times_after_repair": projected,
         "answer_visible_before_reveal": bool(verdict.get("answer_visible_before_reveal", False)),
         "first_answer_visible_time": float(verdict.get("first_answer_visible_time_sec", -1) if verdict.get("first_answer_visible_time_sec") not in (None, "") else -1),
         "question_time_sec": verdict.get("question_time_sec"),
@@ -743,15 +971,38 @@ def analyze(path, payload):
         if semantic.get("repair_required") and semantic.get("repair_plan"):
             warnings.append({
                 "code":"EARLY_REVEAL_REPAIRABLE",
-                "detail":f"Semantic editor repair plan approved at confidence={semantic.get('confidence')}; montage must reorder before publish."
+                "detail":(
+                    f"Reorder plan verified at confidence={semantic.get('repair_confidence')}; "
+                    f"order {semantic.get('original_story_order')} -> {semantic.get('final_story_order')}. "
+                    "Editor must repair before publish."
+                )
             })
         else:
-            issues.append({"code":"EARLY_VISUAL_REVEAL","detail":"Early reveal detected but no safe high-confidence repair plan was produced."})
-    elif sem_status in {"UNCERTAIN","SKIPPED"}:
-        issues.append({"code":"SEMANTIC_VISION_NOT_RUN","detail":semantic.get("reason","Semantic story result uncertain")})
+            issues.append({
+                "code":"EARLY_VISUAL_REVEAL",
+                "detail":f"Early reveal with no safe plan: {semantic.get('repair_validation_reason','unknown')}"
+            })
+    elif sem_status == "UNCERTAIN":
+        # Spec: UNCERTAIN is a hold for human review, never a speculative cut.
+        issues.append({
+            "code":"STORY_STATUS_UNCERTAIN",
+            "detail":semantic.get("reason","Story order could not be established with confidence")
+        })
+    elif sem_status == "SKIPPED":
+        issues.append({
+            "code":"SEMANTIC_VISION_NOT_RUN",
+            "detail":semantic.get("reason","Semantic story QA did not run")
+        })
 
     qa_pass = len(issues) == 0
-    qa_status = "technical_hold" if technical_hold else ("pass_repairable" if qa_pass and semantic.get("repair_required") else ("pass" if qa_pass else "fail"))
+    if technical_hold:
+        qa_status = "technical_hold"
+    elif not qa_pass:
+        qa_status = "hold_for_review" if sem_status == "UNCERTAIN" else "fail"
+    elif semantic.get("repair_required"):
+        qa_status = "pass_repairable"
+    else:
+        qa_status = "pass"
     return {
         "qa_pass": qa_pass,
         "qa_status": qa_status,
@@ -759,6 +1010,19 @@ def analyze(path, payload):
         "story_repair_plan": semantic.get("repair_plan") if isinstance(semantic.get("repair_plan"), dict) else {},
         "story_segments": semantic.get("story_segments") if isinstance(semantic.get("story_segments"), list) else [],
         "semantic_story": semantic,
+        "story_telemetry": {
+            "status": sem_status,
+            "confidence": semantic.get("confidence"),
+            "repair_required": bool(semantic.get("repair_required")),
+            "repair_confidence": semantic.get("repair_confidence"),
+            "original_story_order": semantic.get("original_story_order", []),
+            "final_story_order": semantic.get("final_story_order", []),
+            "original_story_segments": semantic.get("original_story_segments", []),
+            "final_story_segments": semantic.get("final_story_segments", []),
+            "projected_times_after_repair": semantic.get("projected_times_after_repair", {}),
+            "block_reason": semantic.get("block_reason", ""),
+            "validation_reason": semantic.get("repair_validation_reason", ""),
+        },
         "issues": issues,
         "warnings": warnings,
         "metrics": {
@@ -772,16 +1036,44 @@ def analyze(path, payload):
         }
     }
 
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--payload-b64", required=True)
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
     payload = decode_payload(args.payload_b64)
+
+    # CREDIT SAFETY: QA never generates. It only inspects a RAW that already
+    # exists. A retry must point at the same video_url, and the fingerprint
+    # below lets n8n prove the bytes were identical rather than trusting it.
+    attempt = int(payload.get("qa_attempt") or 1)
+    expected_sha = str(payload.get("raw_sha256") or "").strip().lower()
+
     with tempfile.TemporaryDirectory(prefix="kp_raw_qa_") as td:
         video = Path(td) / "raw.mp4"
         download(payload.get("video_url"), video)
+        raw_sha = sha256_file(video)
+        raw_bytes = Path(video).stat().st_size
         result = analyze(video, payload)
+
+    raw_mismatch = bool(expected_sha and expected_sha != raw_sha)
+    if raw_mismatch:
+        result["qa_pass"] = False
+        result["qa_status"] = "technical_hold"
+        result.setdefault("issues", []).append({
+            "code": "RAW_IDENTITY_MISMATCH",
+            "detail": f"Retry fetched different bytes (expected {expected_sha[:12]}, got {raw_sha[:12]}). "
+                      "Holding instead of re-judging a different RAW.",
+        })
+
     result.update({
         "short_id": payload.get("short_id",""),
         "video_url": payload.get("video_url",""),
@@ -789,6 +1081,13 @@ def main():
         "lesson_key": payload.get("lesson_key",""),
         "title": payload.get("title",""),
         "content_mode": payload.get("content_mode","education"),
+        "qa_attempt": attempt,
+        "raw_sha256": raw_sha,
+        "raw_bytes": raw_bytes,
+        "raw_reused": bool(expected_sha) and not raw_mismatch,
+        "raw_identity_verified": bool(expected_sha) and not raw_mismatch,
+        "generation_triggered": False,
+        "qa_generation_allowed": False,
     })
     Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False))
