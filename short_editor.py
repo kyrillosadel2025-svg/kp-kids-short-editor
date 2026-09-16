@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V12: Visual Story Analyzer + Spoiler Guard + Safe Reveal Reordering
+# KP Kids Short Editor V13: Semantic Story Repair + Spoiler Guard + Safe Multi-Segment Reordering
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -52,7 +52,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V12 Visual Story Analyzer + Spoiler Guard"
+EDITOR_VERSION = "V13 Semantic Story Repair + Spoiler Guard"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -87,129 +87,22 @@ MOTION_GRAPHICS_MAX_ALPHA = 0.55
 
 
 
-# ---- Video generation model selector / cost preview -------------------------
-# USD estimates shown BEFORE the generation API call. Veo values are official
-# Gemini API per-second prices as of 2026-09-15. Other providers are deliberately
-# configurable because account/provider credit conversion can differ.
-VIDEO_MODEL_CATALOG = {
-    "veo-3.1": {
-        "label": "Veo 3.1",
-        "provider": "Google Gemini API",
-        "model_id": "veo-3.1-generate-preview",
-        "usd_per_second": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
-        "credit_mode": "usd",
-    },
-    "veo-3.1-fast": {
-        "label": "Veo 3.1 Fast",
-        "provider": "Google Gemini API",
-        "model_id": "veo-3.1-fast-generate-preview",
-        "usd_per_second": {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
-        "credit_mode": "usd",
-    },
-    "veo-3.1-lite": {
-        "label": "Veo 3.1 Lite",
-        "provider": "Google Gemini API",
-        "model_id": "veo-3.1-lite-generate-preview",
-        "usd_per_second": {"720p": 0.05, "1080p": 0.08},
-        "credit_mode": "usd",
-    },
-    "seedance": {
-        "label": "Seedance",
-        "provider": "configured API provider",
-        "model_id": "seedance",
-        "usd_per_second": {},
-        "credit_mode": "provider",
-        "env_credit_rate": "SEEDANCE_CREDITS_PER_SECOND",
-    },
-    "kling": {
-        "label": "Kling",
-        "provider": "configured API provider",
-        "model_id": "kling",
-        "usd_per_second": {},
-        "credit_mode": "provider",
-        "env_credit_rate": "KLING_CREDITS_PER_SECOND",
-    },
-}
-
-def estimate_generation_cost(model_key, duration=8.0, resolution="720p"):
-    model = VIDEO_MODEL_CATALOG.get(str(model_key or "").lower())
-    if not model:
-        return {"known": False, "message": f"Unknown video model: {model_key}"}
-    duration = max(0.0, float(duration or 0.0))
-    resolution = str(resolution or "720p").lower()
-    rate = model.get("usd_per_second", {}).get(resolution)
-    if rate is not None:
-        total = rate * duration
-        return {
-            "known": True, "label": model["label"], "provider": model["provider"],
-            "duration": duration, "resolution": resolution,
-            "usd_per_second": rate, "estimated_usd": round(total, 4),
-            "message": f'{model["label"]}: estimated API charge ${total:.2f} '
-                       f'({duration:g}s, {resolution}, ${rate:.2f}/s).'
-        }
-
-    env_name = model.get("env_credit_rate")
-    raw = os.environ.get(env_name, "") if env_name else ""
-    try:
-        credits_per_second = float(raw)
-    except (TypeError, ValueError):
-        credits_per_second = None
-    if credits_per_second is not None:
-        credits = credits_per_second * duration
-        return {
-            "known": True, "label": model["label"], "provider": model["provider"],
-            "duration": duration, "resolution": resolution,
-            "credits_per_second": credits_per_second,
-            "estimated_credits": round(credits, 3),
-            "message": f'{model["label"]}: estimated {credits:.2f} provider credits '
-                       f'({duration:g}s at {credits_per_second:g} credits/s).'
-        }
-    return {
-        "known": False, "label": model["label"], "provider": model["provider"],
-        "duration": duration, "resolution": resolution,
-        "message": f'{model["label"]}: exact credit cost is not configured. '
-                   f'Set {env_name}=<credits_per_second> for your API/provider account.'
-    }
-
-def choose_video_model_interactive(duration=8.0, resolution="720p"):
-    """CLI selector that previews cost and requires confirmation before spending."""
-    keys = list(VIDEO_MODEL_CATALOG)
-    while True:
-        print("\nVideo generation model:", flush=True)
-        for i, key in enumerate(keys, 1):
-            print(f" {i}. {VIDEO_MODEL_CATALOG[key]['label']}", flush=True)
-        raw = input("Choose model number: ").strip()
-        try:
-            key = keys[int(raw)-1]
-        except (ValueError, IndexError):
-            print("Invalid choice.", flush=True)
-            continue
-        estimate = estimate_generation_cost(key, duration, resolution)
-        print("\nCOST PREVIEW:", estimate["message"], flush=True)
-        answer = input("Continue with this model? [y/N]: ").strip().lower()
-        if answer in {"y", "yes"}:
-            return key, estimate
-        print("No API call made. Choose another model.", flush=True)
-
-def resolve_video_model(payload):
-    """Resolve model + cost preview for upstream generation workflows."""
-    key = str(payload.get("video_model") or os.environ.get("KP_VIDEO_MODEL") or "").lower()
-    duration = float(payload.get("generation_duration") or 8.0)
-    resolution = str(payload.get("generation_resolution") or "720p").lower()
-    if not key:
-        key, estimate = choose_video_model_interactive(duration, resolution)
-    else:
-        estimate = estimate_generation_cost(key, duration, resolution)
-        print("COST PREVIEW:", estimate["message"], flush=True)
-    return key, estimate
-
+# ---- Video generation is handled upstream by n8n/KIE (Grok fixed). ---------
+# The editor never chooses or creates a generation model; it only edits an existing RAW.
 
 def run(cmd):
     print("+", " ".join(str(x) for x in cmd), flush=True)
     subprocess.run(cmd, check=True)
 
 def download(url, dest):
-    req = urllib.request.Request(url, headers={"User-Agent": "KP-Kids-Short-Editor/2.0"})
+    raw = str(url or "").strip()
+    if raw.startswith("file://"):
+        shutil.copyfile(raw[7:], dest)
+        return
+    if raw and Path(raw).exists():
+        shutil.copyfile(raw, dest)
+        return
+    req = urllib.request.Request(raw, headers={"User-Agent": "KP-Kids-Short-Editor/3.0"})
     with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
         while True:
             chunk = r.read(1024 * 1024)
@@ -1099,12 +992,12 @@ def analyze_visual_story_order(path, payload, source_duration, metadata_plan):
     rf=_nearest_frame(frames,reveal)
     if not rf: return report
     # Ignore the first 0.35s (generation/fade artifacts). Compare reveal state with
-    # several frames before the question and with frames just after the reveal.
-    pre=[_frame_similarity(f,rf[1]) for t,f in frames if 0.35 <= t <= max(0.35,question-0.25)]
+    # several frames before the intended reveal and with frames just after the reveal.
+    pre=[_frame_similarity(f,rf[1]) for t,f in frames if 0.35 <= t <= max(0.35,reveal-0.25)]
     post=[_frame_similarity(f,rf[1]) for t,f in frames if reveal <= t <= min(source_duration,reveal+1.5)]
     pre_med=_median(pre); post_med=_median(post)
     report.update({"reveal_time":reveal,"question_time":question,
-                   "pre_question_reveal_similarity":None if pre_med is None else round(pre_med,4),
+                   "pre_reveal_state_similarity":None if pre_med is None else round(pre_med,4),
                    "post_reveal_similarity":None if post_med is None else round(post_med,4),
                    "samples":len(frames)})
     if pre_med is None or post_med is None:
@@ -1115,7 +1008,7 @@ def analyze_visual_story_order(path, payload, source_duration, metadata_plan):
         confidence=min(0.99,0.72 + max(0.0,pre_med-VISUAL_PERSISTENT_MIN_SIM)*1.8 +
                        max(0.0,pre_med-(post_med-VISUAL_PRE_POST_MARGIN))*1.2)
         report.update(action="block_persistent_spoiler",confidence=round(confidence,3),
-                      reason="reveal_visual_state_already_present_before_question")
+                      reason="reveal_visual_state_already_present_before_reveal")
         return report
     # If metadata already found an early isolated reveal, pixels act as confirmation.
     if metadata_plan.get("action") == "move_reveal_to_end":
@@ -1123,6 +1016,228 @@ def analyze_visual_story_order(path, payload, source_duration, metadata_plan):
                       confidence=max(float(metadata_plan.get("confidence") or 0),0.80),
                       reason="metadata_inversion_with_nonpersistent_visual_reveal")
     return report
+
+
+# ---- V13 Semantic Story Repair -----------------------------------------------
+SEMANTIC_REPAIR_MIN_CONFIDENCE = 0.82
+SEMANTIC_SEGMENT_MIN_SECONDS = 0.18
+SEMANTIC_SEGMENT_MAX_COUNT = 10
+
+_STORY_LABEL_ALIASES = {
+    "OPENING": "HOOK", "INTRO": "HOOK", "HOOK": "HOOK",
+    "QUESTION": "QUESTION", "ASK": "QUESTION", "CHALLENGE": "QUESTION",
+    "THINK": "THINK", "THINKING": "THINK", "PAUSE": "THINK", "COUNTDOWN": "THINK",
+    "REVEAL": "REVEAL", "ANSWER": "REVEAL", "RESULT": "REVEAL", "SOLUTION": "REVEAL",
+    "REINFORCE": "REINFORCE", "REINFORCEMENT": "REINFORCE", "EXPLAIN": "REINFORCE",
+    "CHILD_TURN": "CHILD_TURN", "CHILD TURN": "CHILD_TURN", "INTERACTION": "CHILD_TURN",
+    "YOUR_TURN": "CHILD_TURN", "YOUR TURN": "CHILD_TURN", "INVITE": "CHILD_TURN",
+    "PAYOFF": "PAYOFF", "REWARD": "PAYOFF", "CLOSING": "PAYOFF", "OUTRO": "PAYOFF",
+}
+_STORY_CANONICAL_ORDER = {
+    "HOOK": 0, "QUESTION": 1, "THINK": 2, "REVEAL": 3,
+    "REINFORCE": 4, "CHILD_TURN": 5, "PAYOFF": 6,
+}
+
+def _normalize_story_label(value):
+    s = str(value or "").strip().upper().replace("-", "_")
+    s = re.sub(r"\s+", " ", s)
+    if s in _STORY_LABEL_ALIASES:
+        return _STORY_LABEL_ALIASES[s]
+    s2 = s.replace(" ", "_")
+    return _STORY_LABEL_ALIASES.get(s2, s2)
+
+def _semantic_story_from_payload(payload):
+    candidates = [
+        payload.get("qa_semantic_story"),
+        payload.get("semantic_story"),
+        (payload.get("qa_metrics") or {}).get("semantic_story") if isinstance(payload.get("qa_metrics"), dict) else None,
+    ]
+    for item in candidates:
+        if isinstance(item, dict) and item:
+            return item
+    return {}
+
+def _repair_plan_from_payload(payload):
+    semantic = _semantic_story_from_payload(payload)
+    plan = payload.get("story_repair_plan")
+    if not isinstance(plan, dict) or not plan:
+        plan = semantic.get("repair_plan")
+    if not isinstance(plan, dict):
+        plan = {}
+    segs = plan.get("output_segments")
+    if not isinstance(segs, list) or not segs:
+        segs = payload.get("story_segments")
+    if not isinstance(segs, list) or not segs:
+        segs = semantic.get("story_segments")
+    if isinstance(segs, list) and segs and "output_segments" not in plan:
+        plan = dict(plan)
+        plan["output_segments"] = segs
+    return semantic, plan
+
+def validate_semantic_repair_plan(payload, source_duration):
+    semantic, plan = _repair_plan_from_payload(payload)
+    status = str(semantic.get("status") or payload.get("semantic_story_status") or "").upper()
+    report = {
+        "requested": bool(payload.get("repair_required") or semantic.get("repair_required") or plan),
+        "status": status,
+        "valid": False,
+        "confidence": 0.0,
+        "reason": "no_semantic_repair_plan",
+        "segments": [],
+    }
+    if status == "PERSISTENT_EARLY_REVEAL":
+        report["reason"] = "persistent_spoiler_is_not_repairable"
+        return report
+    action = str(plan.get("action") or "").lower()
+    if action not in {"reorder_segments", "reorder", "move_segments"}:
+        report["reason"] = "semantic_plan_has_no_reorder_action"
+        return report
+    try:
+        conf = float(plan.get("confidence", semantic.get("confidence", 0.0)) or 0.0)
+    except Exception:
+        conf = 0.0
+    report["confidence"] = max(0.0, min(1.0, conf))
+    if report["confidence"] < SEMANTIC_REPAIR_MIN_CONFIDENCE:
+        report["reason"] = "semantic_repair_confidence_below_threshold"
+        return report
+
+    raw_segments = plan.get("output_segments")
+    if not isinstance(raw_segments, list) or not (2 <= len(raw_segments) <= SEMANTIC_SEGMENT_MAX_COUNT):
+        report["reason"] = "invalid_semantic_segment_count"
+        return report
+
+    cleaned = []
+    for i, seg in enumerate(raw_segments):
+        if not isinstance(seg, dict):
+            report["reason"] = f"segment_{i}_not_object"
+            return report
+        label = _normalize_story_label(seg.get("label") or seg.get("phase") or seg.get("type"))
+        a = _safe_float(seg.get("start_sec", seg.get("start", seg.get("source_start"))))
+        b = _safe_float(seg.get("end_sec", seg.get("end", seg.get("source_end"))))
+        if a is None or b is None:
+            report["reason"] = f"segment_{i}_missing_time"
+            return report
+        a = max(0.0, min(float(a), source_duration))
+        b = max(0.0, min(float(b), source_duration))
+        if b - a < SEMANTIC_SEGMENT_MIN_SECONDS:
+            report["reason"] = f"segment_{i}_too_short"
+            return report
+        order = seg.get("order", seg.get("output_order", i))
+        try:
+            order = float(order)
+        except Exception:
+            order = float(i)
+        cleaned.append({
+            "label": label, "source_start": a, "source_end": b,
+            "order": order, "source_index": i,
+        })
+
+    cleaned.sort(key=lambda x: (x["order"], x["source_index"]))
+    # The plan must put the question before the reveal.
+    labels = [x["label"] for x in cleaned]
+    if "QUESTION" not in labels or "REVEAL" not in labels:
+        report["reason"] = "repair_plan_requires_question_and_reveal_segments"
+        return report
+    if labels.index("QUESTION") >= labels.index("REVEAL"):
+        report["reason"] = "repair_plan_still_places_reveal_before_question"
+        return report
+
+    # Do not accept overlapping source cuts: overlap usually means the model did not
+    # produce clean edit boundaries and could duplicate dialogue.
+    source_sorted = sorted(cleaned, key=lambda x: x["source_start"])
+    for prev, cur in zip(source_sorted, source_sorted[1:]):
+        if cur["source_start"] < prev["source_end"] - 0.04:
+            report["reason"] = "repair_segments_overlap_in_source"
+            return report
+
+    selected = sum(x["source_end"] - x["source_start"] for x in cleaned)
+    if selected < min(5.0, source_duration * 0.45):
+        report["reason"] = "repair_plan_discards_too_much_of_story"
+        return report
+    if selected > source_duration + 0.15:
+        report["reason"] = "repair_plan_duration_exceeds_source"
+        return report
+
+    report.update(valid=True, reason="semantic_repair_plan_valid", segments=cleaned)
+    return report
+
+def apply_semantic_story_repair(source_path, dest_path, repair_report):
+    """Reorder multiple semantic story segments while preserving their original audio."""
+    if not repair_report.get("valid"):
+        return {"applied": False, "reason": repair_report.get("reason", "invalid_plan"), "segments": []}
+    info = ffprobe_video_info(source_path)
+    segments = repair_report["segments"]
+    fc = []
+    concat_inputs = []
+    output_t = 0.0
+    mapped = []
+    for i, seg in enumerate(segments):
+        a, b = seg["source_start"], seg["source_end"]
+        fc.append(f"[0:v]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v{i}]")
+        concat_inputs.append(f"[v{i}]")
+        if info["has_audio"]:
+            fc.append(f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a{i}]")
+            concat_inputs.append(f"[a{i}]")
+        dur = b - a
+        mapped.append({
+            **seg,
+            "output_start": output_t,
+            "output_end": output_t + dur,
+        })
+        output_t += dur
+
+    if info["has_audio"]:
+        fc.append("".join(concat_inputs) + f"concat=n={len(segments)}:v=1:a=1[v][a]")
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-i", str(source_path),
+            "-filter_complex", ";".join(fc),
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+            "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-movflags", "+faststart", str(dest_path),
+        ]
+    else:
+        fc.append("".join(concat_inputs) + f"concat=n={len(segments)}:v=1:a=0[v]")
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-i", str(source_path),
+            "-filter_complex", ";".join(fc),
+            "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+            "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
+            "-movflags", "+faststart", str(dest_path),
+        ]
+    run(cmd)
+    return {
+        "applied": True,
+        "reason": "semantic_segments_reordered",
+        "confidence": repair_report.get("confidence", 0.0),
+        "segments": mapped,
+        "output_duration": output_t,
+    }
+
+def apply_semantic_repair_time_metadata(payload, repair_result):
+    if not repair_result.get("applied"):
+        return payload
+    p = dict(payload)
+    p["original_dialogue_timeline"] = p.get("dialogue_timeline", "")
+    segments = repair_result.get("segments") or []
+    by_label = {}
+    for seg in segments:
+        by_label.setdefault(seg.get("label"), seg)
+    def event_time(label, fraction=0.15):
+        seg = by_label.get(label)
+        if not seg:
+            return None
+        return seg["output_start"] + min(0.25, max(0.05, (seg["output_end"]-seg["output_start"])*fraction))
+    qt = event_time("QUESTION")
+    rt = event_time("REVEAL")
+    it = event_time("CHILD_TURN")
+    if qt is not None: p["question_time"] = qt
+    if rt is not None: p["reveal_time"] = rt
+    if it is not None: p["interaction_time"] = it
+    p["semantic_story_repair_applied"] = True
+    p["semantic_story_repair_segments"] = segments
+    return p
 
 def remap_time_after_story_reorder(seconds, story_plan, duration):
     t = _safe_float(seconds)
@@ -2369,15 +2484,70 @@ def edit_video(src, out, payload):
 
     silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
 
-    # V11 Story Analyzer runs before pacing/graphics so every later edit point sees
-    # the corrected story order. It changes nothing unless confidence is high.
+    # V13: semantic QA from the RAW guard is authoritative when available.
+    # Persistent spoilers are not repairable. A high-confidence isolated/misordered
+    # story can be rebuilt from semantic source segments before any pacing/graphics.
+    semantic_story, _ = _repair_plan_from_payload(payload)
+    semantic_status = str(semantic_story.get("status") or "").upper()
+    semantic_repair_report = validate_semantic_repair_plan(payload, source_duration)
+    semantic_repair_result = {"applied": False, "reason": semantic_repair_report.get("reason", "not_requested"), "segments": []}
+
+    if semantic_status == "PERSISTENT_EARLY_REVEAL":
+        raise RuntimeError(
+            "V13 SEMANTIC STORY QA BLOCK: persistent early reveal/spoiler exists before the intended reveal; "
+            "normal montage cannot safely remove a persistent answer. " + json.dumps(semantic_story, ensure_ascii=False)
+        )
+
+    if semantic_repair_report.get("valid"):
+        story_fixed = str(Path(out).with_name(Path(out).stem + "_semantic_story_fixed.mp4"))
+        semantic_repair_result = apply_semantic_story_repair(src, story_fixed, semantic_repair_report)
+        if semantic_repair_result.get("applied"):
+            payload = apply_semantic_repair_time_metadata(payload, semantic_repair_result)
+            src = story_fixed
+            info = ffprobe_video_info(src)
+            source_duration = min(15.0, info["duration"] or source_duration)
+            silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+
+    # Metadata-only fallback is kept for old videos or a repairable single reveal
+    # when semantic QA did not provide a safe multi-segment plan.
     story_analysis = analyze_story_order(payload, source_duration, silence_intervals)
-    visual_story_analysis = analyze_visual_story_order(src, payload, source_duration, story_analysis)
+    if semantic_repair_result.get("applied"):
+        story_analysis = {
+            "enabled": True,
+            "action": "semantic_reorder_applied",
+            "confidence": semantic_repair_report.get("confidence", 0.0),
+            "reason": "upstream_semantic_story_repair_applied",
+            "segments": semantic_repair_result.get("segments", []),
+            "reveal_time": payload.get("reveal_time"),
+            "question_time": payload.get("question_time"),
+        }
+
+    if semantic_status in {"CORRECT_REVEAL", "EARLY_REVEAL_MOVABLE"}:
+        visual_story_analysis = {
+            "enabled": True,
+            "source": "upstream_semantic_vision",
+            "action": "keep" if semantic_status == "CORRECT_REVEAL" else (
+                "semantic_repair_applied" if semantic_repair_result.get("applied") else "repairable_without_plan"
+            ),
+            "confidence": semantic_story.get("confidence"),
+            "reason": semantic_story.get("reason", ""),
+            "status": semantic_status,
+        }
+    else:
+        visual_story_analysis = analyze_visual_story_order(src, payload, source_duration, story_analysis)
+
+    print("Semantic Repair:", json.dumps(semantic_repair_result, ensure_ascii=False), flush=True)
     print("Story Analyzer:", json.dumps(story_analysis, ensure_ascii=False), flush=True)
     print("Visual Story Analyzer:", json.dumps(visual_story_analysis, ensure_ascii=False), flush=True)
+
     if visual_story_analysis.get("action") == "block_persistent_spoiler":
-        raise RuntimeError("V12 VISUAL STORY QA BLOCK: persistent early reveal/spoiler detected before the question; regeneration recommended; no montage can safely hide a persistent spoiler. " + json.dumps(visual_story_analysis, ensure_ascii=False))
-    if story_analysis.get("action") == "move_reveal_to_end":
+        raise RuntimeError(
+            "V13 VISUAL STORY QA BLOCK: persistent early reveal/spoiler detected before the intended reveal; "
+            "regeneration recommended; no montage can safely hide a persistent spoiler. "
+            + json.dumps(visual_story_analysis, ensure_ascii=False)
+        )
+
+    if (not semantic_repair_result.get("applied")) and story_analysis.get("action") == "move_reveal_to_end":
         story_fixed = str(Path(out).with_name(Path(out).stem + "_story_fixed.mp4"))
         if apply_story_reorder(src, story_fixed, story_analysis):
             payload = apply_story_time_metadata(payload, story_analysis, source_duration)
@@ -2422,6 +2592,7 @@ def edit_video(src, out, payload):
     return {
         "story_analysis": story_analysis,
         "visual_story_analysis": visual_story_analysis,
+        "semantic_repair": semantic_repair_result,
         "editorial_style": edit_plan["style"],
         "edit_plan": edit_plan,
         "timing_plan": timing,
@@ -2572,6 +2743,7 @@ def main():
     meta["pacing_mode"] = "silence_aware_variable_speed"
     meta["story_analysis"] = result.get("story_analysis", {})
     meta["visual_story_analysis"] = result.get("visual_story_analysis", {})
+    meta["semantic_repair"] = result.get("semantic_repair", {})
     meta["editorial_style"] = result["editorial_style"]
     meta["edit_plan"] = result["edit_plan"]
     meta["timing_plan"] = result["timing_plan"]
