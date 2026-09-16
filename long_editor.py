@@ -32,8 +32,8 @@ import urllib.request
 from pathlib import Path
 
 EDITOR_VERSION = "KP Kids Long Editor V1.4 - Smart Pacing + Question Answer Side Sync"
-INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
-CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
+INTRO_DRIVE_FILE_ID = "1K0krAhogRv5ybCw7oXdf_ZwpZ1B2_Ywv"
+CLOSURE_DRIVE_FILE_ID = "1K0krAhogRv5ybCw7oXdf_ZwpZ1B2_Ywv"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
 OUTPUT_FPS = 30
