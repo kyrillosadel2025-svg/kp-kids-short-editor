@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.5 - Smart Landscape Recut FINAL"
+EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
@@ -37,7 +37,7 @@ SEGMENT_FADE = 0.18
 MUSIC_GAIN = 0.72
 
 # Same pacing philosophy as the Shorts editor.
-LONG_BODY_TARGET_SPEED = 0.95
+LONG_BODY_TARGET_SPEED = 0.90
 LONG_SPEECH_SPEED = 0.99
 LONG_SHORT_PAUSE_SPEED = 0.96
 LONG_MEDIUM_PAUSE_SPEED = 0.93
@@ -321,7 +321,7 @@ def build_pacing_plan(duration, silence_intervals):
     factor = current / target_duration if target_duration > 0 else 1.0
 
     for x in raw:
-        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
+        x["speed"] = min(1.0, max(0.86, x["speed"] * factor))
 
     out_t = 0.0
     segments = []
@@ -1181,7 +1181,8 @@ def main():
         "smart_landscape_recut_enabled": payload_bool(payload, "smart_landscape_recut_enabled", True),
         "landscape_recut_style": "large 4:3 focus window + smooth character-to-lesson vertical pan + blurred side fill",
         "qa_sync_enabled": payload_bool(payload, "qa_sync_enabled", True),
-        "pacing_mode": "silence-aware variable speed, Shorts-inspired",
+        "pacing_mode": "silence-aware variable speed targeting 0.90x body pace",
+        "approved_body_playback_speed": LONG_BODY_TARGET_SPEED,
         "branding": brand_meta,
         "intro_drive_file_id": intro_drive_file_id if include_intro else "",
         "closure_drive_file_id": closure_drive_file_id if include_closure else "",
