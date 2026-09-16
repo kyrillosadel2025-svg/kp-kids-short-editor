@@ -1,4 +1,4 @@
-name: KP Kids RAW Video QA - KIE Vision V8 Story Gate
+name: KP Kids RAW Video QA - KIE Vision V9 Story Contract Gate
 
 on:
   workflow_dispatch:
