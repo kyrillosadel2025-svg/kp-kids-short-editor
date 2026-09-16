@@ -24,10 +24,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-EDITOR = ROOT / "short_editor_V14_story_repair.py"
-QC = ROOT / "raw_video_qc_V8_story_repair.py"
-WORKFLOW = ROOT / "qa-raw-short_V8_story_repair.yml"
+ROOT = Path(__file__).resolve().parent
+EDITOR = ROOT / "short_editor.py"
+QC = ROOT / "raw_video_qc.py"
+WORKFLOW = ROOT / "qa-raw-short.yml"
 
 PASSED, FAILED = [], []
 
@@ -462,6 +462,192 @@ def test_json_parsing(qc):
     check("still raises on genuinely missing JSON", ok)
 
 
+# ==========================================================================
+# Story contracts and beat-order repair
+# ==========================================================================
+def test_story_contracts(editor, qc):
+    print("\n[11] " + "Story contracts: the child's turn must come before the answer")
+    import story_contract as sc
+
+    findit = {"episode_format": "find-it", "question_line": "Can you find the apple?",
+              "interaction_type": "point at it"}
+    teach = {"episode_format": "teach the shapes", "question_line": "What shape is this?",
+             "hook_type": "explain"}
+
+    c1, _ = sc.resolve_story_contract(findit)
+    c2, _ = sc.resolve_story_contract(teach)
+    check("find-it episode uses interaction_first", c1 == "interaction_first", c1)
+    check("teaching episode uses reveal_first", c2 == "reveal_first", c2)
+
+    override = dict(findit, story_contract="reveal_first")
+    c3, why = sc.resolve_story_contract(override)
+    check("explicit contract overrides the guess", c3 == "reveal_first" and "explicit" in why, f"{c3}/{why}")
+
+    m1, _ = sc.resolve_reveal_mode(findit)
+    m2, _ = sc.resolve_reveal_mode({"start_policy": "withhold-result"})
+    check("find-it uses gesture reveal mode", m1 == "gesture", m1)
+    check("withhold-result uses appearance reveal mode", m2 == "appearance", m2)
+
+    # A find-it video whose answer object is on screen throughout must NOT be
+    # treated as a persistent spoiler. That was the old permanent-block trap.
+    check("gesture mode keeps a permanently visible answer repairable",
+          sc.resolve_reveal_mode({"episode_format": "find the apple"})[0] == "gesture")
+
+    order_if = sc.STORY_CONTRACTS["interaction_first"]
+    order_rf = sc.STORY_CONTRACTS["reveal_first"]
+    check("interaction_first puts CHILD_TURN before REVEAL",
+          order_if.index("CHILD_TURN") < order_if.index("REVEAL"), str(order_if))
+    check("reveal_first puts CHILD_TURN after REVEAL",
+          order_rf.index("CHILD_TURN") > order_rf.index("REVEAL"), str(order_rf))
+
+
+def test_beat_order_audit(editor):
+    print("\n[12] " + "Beat-order audit: reveal can be on time and the story still broken")
+    import story_contract as sc
+
+    duration = 15.0
+    silences = [(0.0, 0.6), (2.8, 4.4), (5.4, 10.15), (11.2, 15.0)]
+    beats = [
+        {"label": "HOOK", "start_sec": 0.0, "end_sec": 1.9},
+        {"label": "QUESTION", "start_sec": 1.9, "end_sec": 2.8},
+        {"label": "THINK", "start_sec": 2.8, "end_sec": 4.4},
+        {"label": "REVEAL", "start_sec": 4.4, "end_sec": 10.1},
+        {"label": "CHILD_TURN", "start_sec": 10.1, "end_sec": 11.25},
+        {"label": "PAYOFF", "start_sec": 11.25, "end_sec": duration},
+    ]
+    payload = {"episode_format": "find-it", "question_line": "Can you find the apple?",
+               "interaction_type": "point at it"}
+
+    audit = sc.audit_story_order(beats, payload, duration, silences)
+    check("late child turn is detected", audit["status"] == "ORDER_REPAIRABLE", audit["reason"])
+    check("the violation names REVEAL before CHILD_TURN",
+          any(v["earlier"] == "REVEAL" and v["later"] == "CHILD_TURN" for v in audit["violations"]),
+          str(audit["violations"]))
+    target = audit["target_order"]
+    check("repaired order invites the child before answering",
+          target.index("CHILD_TURN") < target.index("REVEAL"), str(target))
+    check("repaired order keeps the question first",
+          target.index("QUESTION") < target.index("CHILD_TURN"), str(target))
+
+    # The same beats under a teaching contract are already correct.
+    teach_audit = sc.audit_story_order(beats, {"episode_format": "teach colours"}, duration, silences)
+    check("the same beats are correct under reveal_first",
+          teach_audit["status"] == "ORDER_OK", teach_audit["reason"])
+
+    # A cut that cannot land in silence is refused rather than guessed.
+    dirty = sc.audit_story_order(beats, payload, duration, [(0.0, 0.6)])
+    check("a cut that cannot land in silence is refused",
+          dirty["status"] == "ORDER_UNREPAIRABLE", dirty["reason"])
+
+    # Two beats in the wrong order but covering only half the video: reordering
+    # them would silently drop the rest, so it is refused.
+    sparse = sc.audit_story_order([beats[3], beats[4]], payload, duration, silences)
+    check("sparse beat coverage is refused",
+          sparse["status"] in {"ORDER_UNREPAIRABLE", "ORDER_UNKNOWN"}, sparse["reason"])
+    in_order = sc.audit_story_order(beats[:2], payload, duration, silences)
+    check("an in-order subset needs no repair", in_order["status"] == "ORDER_OK", in_order["reason"])
+
+    # Overlapping beats mean duplicated dialogue.
+    overlapped = [dict(b) for b in beats]
+    overlapped[4]["start_sec"] = 9.0
+    ov = sc.audit_story_order(overlapped, payload, duration, silences)
+    check("overlapping beats are refused", ov["status"] == "ORDER_UNREPAIRABLE", ov["reason"])
+
+
+def test_beat_order_repair_gate(editor):
+    print("\n[13] " + "Editor gate for beat-order repairs")
+    import story_contract as sc
+
+    duration = 15.0
+    silences = [(0.0, 0.6), (2.8, 4.4), (5.4, 10.15), (11.2, 15.0)]
+    beats = [
+        {"label": "HOOK", "start_sec": 0.0, "end_sec": 1.9},
+        {"label": "QUESTION", "start_sec": 1.9, "end_sec": 2.8},
+        {"label": "THINK", "start_sec": 2.8, "end_sec": 4.4},
+        {"label": "REVEAL", "start_sec": 4.4, "end_sec": 10.1},
+        {"label": "CHILD_TURN", "start_sec": 10.1, "end_sec": 11.25},
+        {"label": "PAYOFF", "start_sec": 11.25, "end_sec": duration},
+    ]
+    payload = {"episode_format": "find-it", "question_line": "Can you find the apple?",
+               "interaction_type": "point at it"}
+    audit = sc.audit_story_order(beats, payload, duration, silences)
+
+    good = dict(payload)
+    good["qa_semantic_story"] = {"status": "CORRECT_REVEAL", "confidence": 0.9}
+    good["repair_required"] = True
+    good["story_repair_plan"] = audit["repair_plan"]
+    rep = editor.validate_semantic_repair_plan(good, duration)
+    check("beat_order repair is allowed on CORRECT_REVEAL", rep["valid"], rep["reason"])
+    check("the report records the contract", rep.get("contract") == "interaction_first", str(rep.get("contract")))
+
+    # A plan without repair_kind is still treated as a reveal repair and refused
+    # on a correct reveal, so the old protection is intact.
+    plain = dict(good)
+    plain["story_repair_plan"] = {k: v for k, v in audit["repair_plan"].items() if k != "repair_kind"}
+    rep2 = editor.validate_semantic_repair_plan(plain, duration)
+    check("an unlabelled plan on CORRECT_REVEAL is still refused", not rep2["valid"], rep2["reason"])
+
+    # A beat_order plan may not smuggle an early reveal past the gate.
+    persistent = dict(good)
+    persistent["qa_semantic_story"] = {"status": "PERSISTENT_EARLY_REVEAL", "confidence": 0.95}
+    rep3 = editor.validate_semantic_repair_plan(persistent, duration)
+    check("beat_order cannot repair a persistent spoiler", not rep3["valid"], rep3["reason"])
+
+    # Under interaction_first, a plan that leaves CHILD_TURN after REVEAL is refused.
+    bad = dict(good)
+    bad_plan = dict(audit["repair_plan"])
+    segs = [dict(x) for x in bad_plan["output_segments"]]
+    ci = next(i for i, x in enumerate(segs) if x["label"] == "CHILD_TURN")
+    ri = next(i for i, x in enumerate(segs) if x["label"] == "REVEAL")
+    segs[ci]["order"], segs[ri]["order"] = segs[ri]["order"], segs[ci]["order"]
+    bad_plan["output_segments"] = segs
+    bad["story_repair_plan"] = bad_plan
+    rep4 = editor.validate_semantic_repair_plan(bad, duration)
+    check("interaction_first refuses child turn after reveal", not rep4["valid"], rep4["reason"])
+
+
+def test_attached_picture_stream(editor, workdir):
+    print("\n[14] " + "RAW files carrying a cover image still edit")
+    raw = workdir / "with_cover.mp4"
+    cover = workdir / "cover.png"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                    "-i", "color=c=blue:s=208x360:d=0.1", "-frames:v", "1", str(cover)], check=True)
+    plain = workdir / "plain.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error",
+                    "-f", "lavfi", "-i", "testsrc=size=416x720:rate=24:duration=15",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=15",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(plain)], check=True)
+    # Grok RAWs arrive with an mjpeg attached_pic; "[0:v]" then matches two streams.
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(plain), "-i", str(cover),
+                    "-map", "0", "-map", "1", "-c", "copy", "-c:v:1", "mjpeg",
+                    "-disposition:v:1", "attached_pic", str(raw)], check=True)
+
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v",
+                            "-show_entries", "stream=index", "-of", "csv=p=0", str(raw)],
+                           capture_output=True, text=True)
+    check("fixture really has two video streams", len(probe.stdout.split()) >= 2, probe.stdout)
+
+    plan = {
+        "action": "reorder_segments", "repair_kind": "reveal_order", "confidence": 0.93,
+        "output_segments": [
+            {"label": "QUESTION", "start_sec": 8.0, "end_sec": 15.0, "order": 0},
+            {"label": "REVEAL", "start_sec": 0.0, "end_sec": 8.0, "order": 1},
+        ],
+    }
+    payload = {"qa_semantic_story": {"status": "EARLY_REVEAL_MOVABLE", "confidence": 0.93},
+               "repair_required": True, "story_repair_plan": plan}
+    report = editor.validate_semantic_repair_plan(payload, 15.0)
+    check("plan validates on a cover-art RAW", report["valid"], report["reason"])
+    out = workdir / "cover_fixed.mp4"
+    try:
+        result = editor.apply_semantic_story_repair(str(raw), str(out), report)
+        check("reorder survives the attached cover image", result.get("applied"), result.get("reason", ""))
+        check("cover-art output keeps audio", editor.ffprobe_video_info(out)["has_audio"])
+    except subprocess.CalledProcessError as e:
+        check("reorder survives the attached cover image", False, f"ffmpeg failed: {e}")
+
+
 # --------------------------------------------------------------------------
 def main():
     print("=" * 66)
@@ -479,8 +665,11 @@ def main():
         test_reorder(editor, workdir)
         test_persistent_blocks(editor, workdir)
         test_uncertain_holds(editor, workdir)
-
+        test_attached_picture_stream(editor, workdir)
     test_plan_rejections(editor, qc)
+    test_story_contracts(editor, qc)
+    test_beat_order_audit(editor)
+    test_beat_order_repair_gate(editor)
     test_credit_safety(qc)
     test_json_parsing(qc)
 
