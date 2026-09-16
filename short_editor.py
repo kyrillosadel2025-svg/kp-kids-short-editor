@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# KP Kids Short Editor V13: Semantic Story Repair + Spoiler Guard + Safe Multi-Segment Reordering
+# KP Kids Short Editor V14: Story Gate, Verified Semantic Repair, Spoiler Guard, Safe Multi-Segment Reordering
 # V7.8 strong child-friendly kinetic typography pass:
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
@@ -52,7 +52,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V13 Semantic Story Repair + Spoiler Guard"
+EDITOR_VERSION = "V14 Story Gate + Verified Semantic Repair + Spoiler Guard"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1022,6 +1022,37 @@ def analyze_visual_story_order(path, payload, source_duration, metadata_plan):
 SEMANTIC_REPAIR_MIN_CONFIDENCE = 0.82
 SEMANTIC_SEGMENT_MIN_SECONDS = 0.18
 SEMANTIC_SEGMENT_MAX_COUNT = 10
+SEMANTIC_SEGMENT_OVERLAP_EPSILON = 0.005
+STORY_BLOCK_EXIT_CODE = 3
+
+
+class StoryBlock(Exception):
+    """Raised when the story cannot be published or safely repaired.
+
+    Carries machine-readable detail so n8n can route to a human hold instead of
+    treating the failure as a generic crash and re-generating the video.
+    """
+
+    def __init__(self, code, reason, telemetry=None):
+        self.code = code
+        self.reason = reason
+        self.telemetry = telemetry or {}
+        super().__init__(f"{code}: {reason}")
+
+    def to_dict(self):
+        return {
+            "blocked": True,
+            "block_code": self.code,
+            "block_reason": self.reason,
+            "regeneration_required": self.code in {
+                "PERSISTENT_EARLY_REVEAL", "VISUAL_PERSISTENT_SPOILER"
+            },
+            "human_review_required": self.code in {
+                "STORY_STATUS_UNCERTAIN", "SEMANTIC_QA_ERROR", "UNSAFE_REPAIR_PLAN",
+                "REPAIR_VERIFICATION_FAILED",
+            },
+            "story_telemetry": self.telemetry,
+        }
 
 _STORY_LABEL_ALIASES = {
     "OPENING": "HOOK", "INTRO": "HOOK", "HOOK": "HOOK",
@@ -1075,6 +1106,12 @@ def _repair_plan_from_payload(payload):
     return semantic, plan
 
 def validate_semantic_repair_plan(payload, source_duration):
+    """V14: a reorder plan is executed only for an explicitly movable early reveal.
+
+    source_duration must be the REAL probed duration of the file about to be cut,
+    not a payload-declared value, so a stale or optimistic plan cannot address
+    footage that does not exist.
+    """
     semantic, plan = _repair_plan_from_payload(payload)
     status = str(semantic.get("status") or payload.get("semantic_story_status") or "").upper()
     report = {
@@ -1087,6 +1124,18 @@ def validate_semantic_repair_plan(payload, source_duration):
     }
     if status == "PERSISTENT_EARLY_REVEAL":
         report["reason"] = "persistent_spoiler_is_not_repairable"
+        return report
+    if status in {"UNCERTAIN", "ERROR", ""}:
+        report["reason"] = "repair_requires_explicit_early_reveal_movable_status"
+        return report
+    if status == "CORRECT_REVEAL":
+        report["reason"] = "story_order_already_correct_no_repair_needed"
+        return report
+    if status != "EARLY_REVEAL_MOVABLE":
+        report["reason"] = f"unknown_semantic_status_{status.lower()}"
+        return report
+    if source_duration <= 0:
+        report["reason"] = "source_duration_unknown"
         return report
     action = str(plan.get("action") or "").lower()
     if action not in {"reorder_segments", "reorder", "move_segments"}:
@@ -1117,6 +1166,14 @@ def validate_semantic_repair_plan(payload, source_duration):
         if a is None or b is None:
             report["reason"] = f"segment_{i}_missing_time"
             return report
+        # Reject rather than clamp: a plan that points past the end of the file
+        # was built against different footage and must not be executed.
+        if a < -0.01 or b > source_duration + 0.05:
+            report["reason"] = f"segment_{i}_outside_source_0_{source_duration:.2f}s"
+            return report
+        if b <= a:
+            report["reason"] = f"segment_{i}_end_not_after_start"
+            return report
         a = max(0.0, min(float(a), source_duration))
         b = max(0.0, min(float(b), source_duration))
         if b - a < SEMANTIC_SEGMENT_MIN_SECONDS:
@@ -1142,11 +1199,17 @@ def validate_semantic_repair_plan(payload, source_duration):
         report["reason"] = "repair_plan_still_places_reveal_before_question"
         return report
 
-    # Do not accept overlapping source cuts: overlap usually means the model did not
-    # produce clean edit boundaries and could duplicate dialogue.
+    # The whole output must read as a story, not just question-before-reveal.
+    known = [_STORY_CANONICAL_ORDER[l] for l in labels if l in _STORY_CANONICAL_ORDER]
+    if any(nxt < cur for cur, nxt in zip(known, known[1:])):
+        report["reason"] = "repair_plan_violates_canonical_story_order"
+        return report
+
+    # Do not accept overlapping source cuts: overlap duplicates dialogue.
+    # V13 tolerated 40ms of overlap, which is audible on a plosive. V14 allows 5ms.
     source_sorted = sorted(cleaned, key=lambda x: x["source_start"])
     for prev, cur in zip(source_sorted, source_sorted[1:]):
-        if cur["source_start"] < prev["source_end"] - 0.04:
+        if cur["source_start"] < prev["source_end"] - SEMANTIC_SEGMENT_OVERLAP_EPSILON:
             report["reason"] = "repair_segments_overlap_in_source"
             return report
 
@@ -1207,12 +1270,35 @@ def apply_semantic_story_repair(source_path, dest_path, repair_report):
             "-movflags", "+faststart", str(dest_path),
         ]
     run(cmd)
+
+    # Verify the render instead of trusting it. A concat that silently dropped a
+    # segment, or lost audio, must not reach typography/music/publish.
+    out_info = ffprobe_video_info(dest_path)
+    drift = abs(out_info["duration"] - output_t)
+    if drift > 0.35:
+        raise StoryBlock(
+            "REPAIR_VERIFICATION_FAILED",
+            f"Reordered render is {out_info['duration']:.2f}s but the plan expected "
+            f"{output_t:.2f}s (drift {drift:.2f}s).",
+            {"expected_duration": round(output_t, 3), "actual_duration": round(out_info["duration"], 3)},
+        )
+    if info["has_audio"] and not out_info["has_audio"]:
+        raise StoryBlock(
+            "REPAIR_VERIFICATION_FAILED",
+            "Source had dialogue but the reordered render has no audio stream.",
+            {"segments": mapped},
+        )
+
     return {
         "applied": True,
         "reason": "semantic_segments_reordered",
         "confidence": repair_report.get("confidence", 0.0),
         "segments": mapped,
         "output_duration": output_t,
+        "verified_output_duration": round(out_info["duration"], 3),
+        "audio_preserved": bool(out_info["has_audio"]) if info["has_audio"] else None,
+        "original_story_order": [s["label"] for s in sorted(segments, key=lambda x: x["source_start"])],
+        "final_story_order": [s["label"] for s in segments],
     }
 
 def apply_semantic_repair_time_metadata(payload, repair_result):
@@ -1232,11 +1318,24 @@ def apply_semantic_repair_time_metadata(payload, repair_result):
     qt = event_time("QUESTION")
     rt = event_time("REVEAL")
     it = event_time("CHILD_TURN")
+
+    # Final safety net: after reordering, the reveal must land after the question
+    # in the OUTPUT timeline. If it does not, the repair failed its own purpose.
+    if qt is not None and rt is not None and rt <= qt:
+        raise StoryBlock(
+            "REPAIR_VERIFICATION_FAILED",
+            f"After reordering, reveal ({rt:.2f}s) still lands at or before question ({qt:.2f}s).",
+            {"question_time": qt, "reveal_time": rt, "segments": segments},
+        )
+
     if qt is not None: p["question_time"] = qt
     if rt is not None: p["reveal_time"] = rt
     if it is not None: p["interaction_time"] = it
     p["semantic_story_repair_applied"] = True
     p["semantic_story_repair_segments"] = segments
+    p["times_after_repair"] = {
+        "question_time": qt, "reveal_time": rt, "interaction_time": it
+    }
     return p
 
 def remap_time_after_story_reorder(seconds, story_plan, duration):
@@ -2484,21 +2583,87 @@ def edit_video(src, out, payload):
 
     silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
 
-    # V13: semantic QA from the RAW guard is authoritative when available.
-    # Persistent spoilers are not repairable. A high-confidence isolated/misordered
-    # story can be rebuilt from semantic source segments before any pacing/graphics.
+    # ---------------------------------------------------------------------
+    # STORY GATE (V14). Runs BEFORE pacing, typography, music, intro/closure
+    # and colour. Nothing cosmetic is allowed to touch a story that has not
+    # been cleared, because a polished spoiler is still a spoiler.
+    # ---------------------------------------------------------------------
     semantic_story, _ = _repair_plan_from_payload(payload)
     semantic_status = str(semantic_story.get("status") or "").upper()
-    semantic_repair_report = validate_semantic_repair_plan(payload, source_duration)
-    semantic_repair_result = {"applied": False, "reason": semantic_repair_report.get("reason", "not_requested"), "segments": []}
+    has_semantic_qa = bool(semantic_story)
+    original_source_duration = source_duration
+
+    story_telemetry = {
+        "semantic_status": semantic_status or "ABSENT",
+        "semantic_confidence": semantic_story.get("confidence"),
+        "semantic_reason": str(semantic_story.get("reason") or "")[:600],
+        "semantic_qa_present": has_semantic_qa,
+        "source_duration": round(source_duration, 3),
+        "repair_required": False,
+        "repair_applied": False,
+        "repair_reason": "",
+        "original_story_order": list(semantic_story.get("original_story_order") or []),
+        "final_story_order": [],
+        "moved_segments": [],
+        "times_before_repair": {
+            "question_time": _safe_float(payload.get("question_time")),
+            "reveal_time": _safe_float(payload.get("reveal_time")),
+            "interaction_time": _safe_float(payload.get("interaction_time")),
+        },
+        "times_after_repair": {},
+        "block_code": None,
+        "block_reason": None,
+        "fallback_path": None,
+    }
 
     if semantic_status == "PERSISTENT_EARLY_REVEAL":
-        raise RuntimeError(
-            "V13 SEMANTIC STORY QA BLOCK: persistent early reveal/spoiler exists before the intended reveal; "
-            "normal montage cannot safely remove a persistent answer. " + json.dumps(semantic_story, ensure_ascii=False)
+        story_telemetry.update(block_code="PERSISTENT_EARLY_REVEAL",
+                               block_reason="Answer is baked into the pre-reveal footage; no cut can hide it.")
+        raise StoryBlock(
+            "PERSISTENT_EARLY_REVEAL",
+            "Persistent early reveal: the answer is visible across the pre-reveal story, so montage "
+            "cannot remove it. Regenerate the RAW. " + str(semantic_story.get("reason") or "")[:400],
+            story_telemetry,
+        )
+
+    if semantic_status == "ERROR":
+        story_telemetry.update(block_code="SEMANTIC_QA_ERROR",
+                               block_reason="Vision QA did not return a usable verdict.")
+        raise StoryBlock(
+            "SEMANTIC_QA_ERROR",
+            "Semantic story QA errored, so story order is unknown. Technical hold for bounded retry; "
+            "do NOT regenerate. " + str(semantic_story.get("reason") or "")[:400],
+            story_telemetry,
+        )
+
+    if semantic_status == "UNCERTAIN":
+        story_telemetry.update(block_code="STORY_STATUS_UNCERTAIN",
+                               block_reason="Story order could not be established with confidence.")
+        raise StoryBlock(
+            "STORY_STATUS_UNCERTAIN",
+            "Story status UNCERTAIN: holding for human review rather than performing a speculative cut. "
+            + str(semantic_story.get("reason") or "")[:400],
+            story_telemetry,
+        )
+
+    semantic_repair_report = validate_semantic_repair_plan(payload, source_duration)
+    semantic_repair_result = {"applied": False, "reason": semantic_repair_report.get("reason", "not_requested"), "segments": []}
+    story_telemetry["repair_reason"] = semantic_repair_report.get("reason", "")
+
+    # An early reveal that the model called movable but could not back with a
+    # verifiable plan is a hold, not a silent pass-through.
+    if semantic_status == "EARLY_REVEAL_MOVABLE" and not semantic_repair_report.get("valid"):
+        story_telemetry.update(block_code="UNSAFE_REPAIR_PLAN",
+                               block_reason=semantic_repair_report.get("reason", "plan_rejected"))
+        raise StoryBlock(
+            "UNSAFE_REPAIR_PLAN",
+            "Early reveal detected but the reorder plan failed validation "
+            f"({semantic_repair_report.get('reason')}). Holding for review.",
+            story_telemetry,
         )
 
     if semantic_repair_report.get("valid"):
+        story_telemetry["repair_required"] = True
         story_fixed = str(Path(out).with_name(Path(out).stem + "_semantic_story_fixed.mp4"))
         semantic_repair_result = apply_semantic_story_repair(src, story_fixed, semantic_repair_report)
         if semantic_repair_result.get("applied"):
@@ -2507,9 +2672,33 @@ def edit_video(src, out, payload):
             info = ffprobe_video_info(src)
             source_duration = min(15.0, info["duration"] or source_duration)
             silence_intervals = detect_silence_intervals(src, source_duration) if info["has_audio"] else []
+            segs = semantic_repair_result.get("segments") or []
+            story_telemetry.update({
+                "repair_applied": True,
+                "repair_confidence": semantic_repair_report.get("confidence"),
+                "repair_reason": "semantic_segments_reordered",
+                "original_story_order": [s["label"] for s in sorted(segs, key=lambda x: x["source_start"])],
+                "final_story_order": [s["label"] for s in segs],
+                "moved_segments": [
+                    {
+                        "label": s["label"],
+                        "source_start": round(s["source_start"], 3),
+                        "source_end": round(s["source_end"], 3),
+                        "output_start": round(s["output_start"], 3),
+                        "output_end": round(s["output_end"], 3),
+                        "moved": abs(s["output_start"] - s["source_start"]) > 0.05,
+                    }
+                    for s in segs
+                ],
+                "times_after_repair": payload.get("times_after_repair", {}),
+                "duration_before_repair": round(original_source_duration, 3),
+                "duration_after_repair": round(source_duration, 3),
+            })
 
     # Metadata-only fallback is kept for old videos or a repairable single reveal
     # when semantic QA did not provide a safe multi-segment plan.
+    if not has_semantic_qa:
+        story_telemetry["fallback_path"] = "legacy_metadata_and_silence_guard"
     story_analysis = analyze_story_order(payload, source_duration, silence_intervals)
     if semantic_repair_result.get("applied"):
         story_analysis = {
@@ -2534,17 +2723,29 @@ def edit_video(src, out, payload):
             "status": semantic_status,
         }
     else:
+        # Legacy path only: no upstream semantic verdict exists for this RAW.
+        # Grayscale similarity is a crude spoiler tripwire, NOT semantic
+        # understanding, so it is only ever allowed to block -- never to approve
+        # a cut or to claim it understood the story.
         visual_story_analysis = analyze_visual_story_order(src, payload, source_duration, story_analysis)
+        visual_story_analysis["source"] = "local_grayscale_fallback_guard"
+        visual_story_analysis["semantic"] = False
 
+    print("Story Telemetry:", json.dumps(story_telemetry, ensure_ascii=False), flush=True)
     print("Semantic Repair:", json.dumps(semantic_repair_result, ensure_ascii=False), flush=True)
     print("Story Analyzer:", json.dumps(story_analysis, ensure_ascii=False), flush=True)
     print("Visual Story Analyzer:", json.dumps(visual_story_analysis, ensure_ascii=False), flush=True)
 
     if visual_story_analysis.get("action") == "block_persistent_spoiler":
-        raise RuntimeError(
-            "V13 VISUAL STORY QA BLOCK: persistent early reveal/spoiler detected before the intended reveal; "
-            "regeneration recommended; no montage can safely hide a persistent spoiler. "
-            + json.dumps(visual_story_analysis, ensure_ascii=False)
+        story_telemetry.update(
+            block_code="VISUAL_PERSISTENT_SPOILER",
+            block_reason="Fallback pixel guard: reveal-state frames already present before the intended reveal.",
+        )
+        raise StoryBlock(
+            "VISUAL_PERSISTENT_SPOILER",
+            "Fallback spoiler guard blocked this RAW: the reveal visual state is already present before the "
+            "intended reveal and no montage can hide it. " + json.dumps(visual_story_analysis, ensure_ascii=False)[:400],
+            story_telemetry,
         )
 
     if (not semantic_repair_result.get("applied")) and story_analysis.get("action") == "move_reveal_to_end":
@@ -2589,7 +2790,14 @@ def edit_video(src, out, payload):
         "-movflags", "+faststart", "-t", f"{duration:.3f}", str(out),
     ]
     run(cmd)
+    story_telemetry["final_question_time"] = _safe_float(payload.get("question_time"))
+    story_telemetry["final_reveal_time"] = _safe_float(payload.get("reveal_time"))
+    story_telemetry["final_interaction_time"] = _safe_float(payload.get("interaction_time"))
+    story_telemetry["body_duration_after_pacing"] = round(duration, 3)
+    story_telemetry["generation_triggered"] = False
+
     return {
+        "story_telemetry": story_telemetry,
         "story_analysis": story_analysis,
         "visual_story_analysis": visual_story_analysis,
         "semantic_repair": semantic_repair_result,
@@ -2741,9 +2949,13 @@ def main():
     meta["editor_version"] = EDITOR_VERSION
     meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
     meta["pacing_mode"] = "silence_aware_variable_speed"
+    meta["story_telemetry"] = result.get("story_telemetry", {})
     meta["story_analysis"] = result.get("story_analysis", {})
     meta["visual_story_analysis"] = result.get("visual_story_analysis", {})
     meta["semantic_repair"] = result.get("semantic_repair", {})
+    meta["story_repair_required"] = bool(result.get("story_telemetry", {}).get("repair_required"))
+    meta["story_repair_applied"] = bool(result.get("story_telemetry", {}).get("repair_applied"))
+    meta["generation_triggered"] = False
     meta["editorial_style"] = result["editorial_style"]
     meta["edit_plan"] = result["edit_plan"]
     meta["timing_plan"] = result["timing_plan"]
@@ -2785,4 +2997,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except StoryBlock as block:
+        # Emit a machine-readable hold. n8n must read edit_block.json and route
+        # to review/regeneration-by-decision, NOT auto-retry a paid generation.
+        detail = block.to_dict()
+        detail["editor_version"] = EDITOR_VERSION
+        Path("edit_block.json").write_text(
+            json.dumps(detail, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print("STORY BLOCK: " + json.dumps(detail, ensure_ascii=False), file=sys.stderr, flush=True)
+        sys.exit(STORY_BLOCK_EXIT_CODE)
