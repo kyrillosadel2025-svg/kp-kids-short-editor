@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.4
-
-Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts.
-- Prefers archived Google Drive RAWs, falls back to original video URLs.
-- Converts vertical shorts to 1920x1080 with a blurred side/background fill.
-- Preserves original speech/audio.
-- Adds one continuous real-music bed from the existing music/ library.
-- Uses gentle sidechain ducking so speech remains dominant.
-- Prepends/append the dedicated landscape intro/closure from Google Drive.
-- Writes metadata for the GitHub Action callback.
-"""
+"""KP Kids Long Video Editor V1.4 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Converts vertical shorts to 1920x1080 with a blurred side/background fill. - Preserves original speech/audio. - Adds one continuous real-music bed from the existing music/ library. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
 
 import argparse
 import base64
@@ -625,10 +615,7 @@ def fade_alpha_expr(start, end, fade=0.28):
     )
 
 
-def build_side_graphics_filters(
-    clip, duration, clip_index, clip_total, work_dir,
-    qa_timing=None, qa_sync_enabled=True
-):
+def build_side_graphics_filters( clip, duration, clip_index, clip_total, work_dir, qa_timing=None, qa_sync_enabled=True ):
     """Category on the left; spoken question then spoken answer on the right."""
     category = str(clip.get("category") or "").strip().lower()
     accent = category_accent(category)
@@ -756,10 +743,7 @@ def normalize_brand_clip(src, dest):
     run(cmd)
 
 
-def normalize_vertical_clip(
-    src, dest, clip=None, clip_index=1, clip_total=1,
-    side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True
-):
+def normalize_vertical_clip( src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True ):
     """Smart-pace a Short, then place it untouched in the center of a 16:9 canvas."""
     clip = clip or {}
     source_dur = max(0.5, ffprobe_duration(src))
