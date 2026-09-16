@@ -1,4 +1,4 @@
-name: KP Kids RAW Video QA - KIE Vision V7 Story Repair
+name: KP Kids RAW Video QA - KIE Vision V8 Story Gate
 
 on:
   workflow_dispatch:
@@ -15,6 +15,13 @@ on:
         description: callback auth token
         required: true
         type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kp-kids-raw-qa-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   qa:
@@ -49,6 +56,41 @@ jobs:
             echo "KIE_API_KEY is available to this workflow run."
           fi
 
+      # CREDIT SAFETY GATE.
+      # This job inspects an existing RAW and must never cause a paid image or
+      # video generation. A retry has to carry the same video_url as attempt 1.
+      - name: Credit safety guard
+        shell: bash
+        env:
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, sys, urllib.parse
+          payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+
+          url = str(payload.get("video_url") or "").strip().lstrip("=")
+          if not url:
+              print("::error::Payload has no video_url. QA never generates a video; refusing to run.")
+              sys.exit(1)
+          if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+              print(f"::error::video_url is not a public http(s) RAW: {url[:120]}")
+              sys.exit(1)
+
+          banned = [k for k in ("generate_video", "generate_image", "regenerate",
+                                "nano_banana", "grok_imagine", "image_prompt_submit")
+                    if payload.get(k)]
+          if banned:
+              print(f"::error::Generation-triggering keys present in a QA payload: {banned}")
+              sys.exit(1)
+
+          attempt = int(payload.get("qa_attempt") or 1)
+          expected = str(payload.get("raw_sha256") or "").strip()
+          print(f"QA attempt {attempt} on RAW {url[:90]}")
+          print(f"Expected RAW sha256: {expected or '(first attempt, none recorded yet)'}")
+          if attempt > 1 and not expected:
+              print("::warning::Retry without a recorded raw_sha256 - RAW identity cannot be proven.")
+          PY
+
       - name: Analyze RAW video
         id: qa
         continue-on-error: true
@@ -60,6 +102,17 @@ jobs:
             --payload-b64 "$PAYLOAD_B64" \
             --output raw_qa_result.json \
             2>&1 | tee raw_qa.log
+
+      - name: Upload QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-qa-${{ github.run_id }}
+          path: |
+            raw_qa_result.json
+            raw_qa.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Callback n8n
         if: always()
@@ -82,16 +135,21 @@ jobs:
                   detail = "\n".join(lines[-25:])[-1800:]
               except Exception:
                   pass
+              # A missing result is a TECHNICAL hold, not a story verdict, and not
+              # a reason to regenerate. n8n retries QA against the same RAW.
               result = {
                   "qa_pass": False,
-                  "qa_status": "error",
+                  "qa_status": "technical_hold",
                   "issues": [{"code":"QA_RUNTIME_ERROR","detail":detail or "RAW QA did not produce a result"}],
                   "warnings": [],
-                  "metrics": {}
+                  "metrics": {},
+                  "generation_triggered": False,
+                  "qa_generation_allowed": False,
               }
           body = {
               **payload,
               **result,
+              "qa_attempt": int(payload.get("qa_attempt") or 1),
               "github_run_id": os.environ["GH_RUN_ID"],
               "github_repository": os.environ["GH_REPOSITORY"],
           }
