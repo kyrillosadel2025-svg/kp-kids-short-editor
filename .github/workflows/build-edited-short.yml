@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: write
 
     steps:
       - name: Checkout
@@ -30,15 +29,20 @@ jobs:
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get install -y ffmpeg
 
       - name: Render edited Short
+        env:
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
         run: |
+          set -o pipefail
           python3 short_editor.py \
-            --payload-b64 '${{ inputs.payload_b64 }}' \
-            --output kp_kids_edited_short.mp4
+            --payload-b64 "$PAYLOAD_B64" \
+            --output kp_kids_edited_short.mp4 \
+            2>&1 | tee short_render.log
 
       - name: Upload final MP4 artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kp-kids-edited-short
@@ -59,20 +63,22 @@ jobs:
           python3 - <<'PY'
           import base64, json, os, urllib.request
           payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          try:
+              result = json.load(open("edit_result.json", encoding="utf-8"))
+          except Exception:
+              result = {}
           body = {
+              **payload,
+              **result,
               "status": "success",
               "github_run_id": os.environ["GH_RUN_ID"],
               "github_repository": os.environ["GH_REPO"],
               "artifact_name": "kp-kids-edited-short",
-              **payload,
           }
           req = urllib.request.Request(
               os.environ["CALLBACK_URL"],
               data=json.dumps(body).encode("utf-8"),
-              headers={
-                  "Content-Type": "application/json",
-                  "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"],
-              },
+              headers={"Content-Type": "application/json", "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"]},
               method="POST",
           )
           urllib.request.urlopen(req, timeout=60).read()
@@ -93,21 +99,30 @@ jobs:
               payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
           except Exception:
               payload = {}
+          detail = ""
+          try:
+              lines = open("short_render.log", encoding="utf-8", errors="replace").read().splitlines()
+              detail = "\n".join(lines[-20:])[-1800:]
+          except Exception:
+              pass
+          msg = "GitHub short editor failed"
+          if detail:
+              msg += "\n\nREAL ERROR FROM RENDER:\n" + detail
           body = {
+              **payload,
               "status": "failed",
               "github_run_id": os.environ["GH_RUN_ID"],
               "github_repository": os.environ["GH_REPO"],
-              "message": "GitHub short editor failed",
-              **payload,
+              "message": msg,
           }
           req = urllib.request.Request(
               os.environ["CALLBACK_URL"],
               data=json.dumps(body).encode("utf-8"),
-              headers={
-                  "Content-Type": "application/json",
-                  "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"],
-              },
+              headers={"Content-Type": "application/json", "X-KP-Kids-Callback": os.environ["CALLBACK_TOKEN"]},
               method="POST",
           )
-          urllib.request.urlopen(req, timeout=60).read()
+          try:
+              urllib.request.urlopen(req, timeout=60).read()
+          except Exception as e:
+              print("Failure callback failed:", e)
           PY
