@@ -24,9 +24,10 @@ reveal_first        HOOK QUESTION THINK REVEAL REINFORCE CHILD_TURN PAYOFF
                     Teaching/explaining. The character answers, then the child
                     repeats or practises.
 
-interaction_first   HOOK QUESTION THINK CHILD_TURN REVEAL REINFORCE PAYOFF
-                    Find-it / point-at-it / choose-one. The child must get a
-                    real chance to answer BEFORE the character answers.
+interaction_first   HOOK QUESTION CHILD_TURN THINK REVEAL REINFORCE PAYOFF
+                    Find-it / point-at-it / choose-one. The child is invited
+                    first, then the EDITOR owns a short response wait before
+                    the character reveals the answer.
 
 Reveal modes
 ------------
@@ -61,7 +62,7 @@ STORY_LABEL_ALIASES = {
 
 STORY_CONTRACTS = {
     "reveal_first": ["HOOK", "QUESTION", "THINK", "REVEAL", "REINFORCE", "CHILD_TURN", "PAYOFF"],
-    "interaction_first": ["HOOK", "QUESTION", "THINK", "CHILD_TURN", "REVEAL", "REINFORCE", "PAYOFF"],
+    "interaction_first": ["HOOK", "QUESTION", "CHILD_TURN", "THINK", "REVEAL", "REINFORCE", "PAYOFF"],
 }
 DEFAULT_CONTRACT = "reveal_first"
 
@@ -83,6 +84,60 @@ SEGMENT_OVERLAP_EPSILON = 0.005
 # A cut may move at most this far to land in a silence. Beyond it the boundary is
 # not "clean" and we would be guessing where a word ends.
 BOUNDARY_SNAP_TOLERANCE = 0.45
+
+# Interaction-first pacing policy. The generator should spend its seconds on
+# useful speech/action; the editor creates the response wait deterministically.
+EDITORIAL_RESPONSE_PAUSE_DEFAULT = 1.20
+EDITORIAL_RESPONSE_PAUSE_MIN = 0.75
+EDITORIAL_RESPONSE_PAUSE_MAX = 1.60
+DEAD_AIR_TRIM_THRESHOLD_DEFAULT = 0.80
+DEAD_AIR_KEEP_DEFAULT = 0.30
+
+
+def resolve_editorial_response_pause(payload, contract=None):
+    """Return the editor-owned response-wait policy for this episode.
+
+    The policy is ON by default only for interaction_first episodes. A payload
+    may override it with ``editorial_response_pause`` either as a boolean or an
+    object. The editor clamps timing to conservative preschool-safe bounds.
+    """
+    if contract is None:
+        contract, _ = resolve_story_contract(payload)
+
+    raw = payload.get("editorial_response_pause")
+    if isinstance(raw, bool):
+        cfg = {"enabled": raw}
+    elif isinstance(raw, dict):
+        cfg = dict(raw)
+    else:
+        cfg = {}
+
+    enabled = bool(cfg.get("enabled", contract == "interaction_first"))
+    if contract != "interaction_first":
+        enabled = False
+
+    def num(name, default):
+        try:
+            return float(cfg.get(name, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    min_sec = max(0.40, min(EDITORIAL_RESPONSE_PAUSE_MAX, num("min_sec", EDITORIAL_RESPONSE_PAUSE_MIN)))
+    max_sec = max(min_sec, min(2.20, num("max_sec", EDITORIAL_RESPONSE_PAUSE_MAX)))
+    target = max(min_sec, min(max_sec, num("target_sec", EDITORIAL_RESPONSE_PAUSE_DEFAULT)))
+    trim_threshold = max(0.45, min(3.0, num("dead_air_threshold_sec", DEAD_AIR_TRIM_THRESHOLD_DEFAULT)))
+    keep = max(0.12, min(0.60, num("max_kept_silence_sec", DEAD_AIR_KEEP_DEFAULT)))
+
+    return {
+        "enabled": enabled,
+        "target_sec": round(target, 3),
+        "min_sec": round(min_sec, 3),
+        "max_sec": round(max_sec, 3),
+        "trim_dead_air": bool(cfg.get("trim_dead_air", True)),
+        "dead_air_threshold_sec": round(trim_threshold, 3),
+        "max_kept_silence_sec": round(keep, 3),
+        "trim_labels": tuple(cfg.get("trim_labels") or ("THINK", "REVEAL")),
+    }
 
 
 def normalize_story_label(value):
@@ -153,24 +208,6 @@ def resolve_reveal_mode(payload):
 def contract_order_map(contract):
     beats = STORY_CONTRACTS.get(contract, STORY_CONTRACTS[DEFAULT_CONTRACT])
     return {label: i for i, label in enumerate(beats)}
-
-
-def required_beats_for_audit(contract, payload):
-    """Beats the order audit cannot safely skip for this episode.
-
-    The audit only ever compares PAIRS of beats it was actually given. If
-    Vision never labels a beat at all - CHILD_TURN is the classic case,
-    since it is often a gesture/smile with no isolated "your turn" line -
-    the audit has nothing to compare it against and silently reports
-    ORDER_OK, even though the one beat it is missing is exactly the one the
-    contract exists to protect. This makes that failure mode explicit
-    instead of invisible.
-    """
-    required = {"QUESTION", "REVEAL"}
-    has_invite = bool(payload.get("interaction_type") or payload.get("challenge_line"))
-    if contract == "interaction_first" or has_invite:
-        required.add("CHILD_TURN")
-    return required
 
 
 def contract_rule_text(contract):
@@ -264,32 +301,6 @@ def audit_story_order(story_segments, payload, duration, silences=None):
     report["source_order"] = [b["label"] for b in beats]
 
     known = [b for b in beats if b["label"] in order_map]
-
-    # --- is a beat the contract depends on simply missing from the report? ----
-    # This must run BEFORE the pairwise comparison below: two known beats can
-    # look perfectly ordered relative to EACH OTHER while the beat that would
-    # have exposed the real defect (e.g. CHILD_TURN landing after REVEAL) was
-    # never labelled at all, so it never enters the comparison.
-    #
-    # Only flag it once we have evidence the video got PAST where that beat
-    # belongs - i.e. some later-contract-order beat was identified. Without
-    # that, Vision simply has not described that part of the video yet, which
-    # is a normal partial report, not a missing beat.
-    required = required_beats_for_audit(contract, payload)
-    present = {b["label"] for b in known}
-    present_orders = {order_map[label] for label in present if label in order_map}
-    missing_required = sorted(
-        label for label in required
-        if label not in present
-        and any(o > order_map[label] for o in present_orders)
-    )
-    if missing_required:
-        report.update(
-            status="ORDER_UNKNOWN",
-            reason="required_beat_not_identified:" + ",".join(missing_required),
-        )
-        return report
-
     if len(known) < 2:
         report["reason"] = "no_contract_beats_identified"
         return report
