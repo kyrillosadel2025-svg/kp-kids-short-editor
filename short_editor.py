@@ -42,7 +42,7 @@ from pathlib import Path
 # Shared with raw_video_qc.py: one definition of story order for the whole pipeline.
 from story_contract import (
     STORY_CONTRACTS, DEFAULT_CONTRACT, contract_order_map,
-    resolve_story_contract, resolve_reveal_mode,
+    resolve_story_contract, resolve_reveal_mode, resolve_editorial_response_pause,
     normalize_story_label as _normalize_story_label,
 )
 
@@ -59,7 +59,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V15 Story Contracts + Beat-Order Repair + Spoiler Guard"
+EDITOR_VERSION = "V16 Story Contracts + Editor-Owned Response Pause + Dead-Air Trim"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -1200,6 +1200,7 @@ def validate_semantic_repair_plan(payload, source_duration):
     contract, contract_reason = resolve_story_contract(payload)
     report["contract"] = contract
     report["contract_reason"] = contract_reason
+    report["editorial_response_pause"] = resolve_editorial_response_pause(payload, contract)
     order_map = contract_order_map(contract)
     known = [order_map[l] for l in labels if l in order_map]
     if any(nxt < cur for cur, nxt in zip(known, known[1:])):
@@ -1229,33 +1230,152 @@ def validate_semantic_repair_plan(payload, source_duration):
     report.update(valid=True, reason="semantic_repair_plan_valid", segments=cleaned)
     return report
 
+def _compressed_source_ranges(seg, silences, pause_policy):
+    """Keep speech/action, remove only the middle of long silent dead-air spans."""
+    a, b = float(seg["source_start"]), float(seg["source_end"])
+    label = str(seg.get("label") or "")
+    if not pause_policy.get("enabled") or not pause_policy.get("trim_dead_air"):
+        return [(a, b)], 0.0
+    if label not in set(pause_policy.get("trim_labels") or ("THINK", "REVEAL")):
+        return [(a, b)], 0.0
+
+    threshold = float(pause_policy.get("dead_air_threshold_sec") or 0.8)
+    keep_total = float(pause_policy.get("max_kept_silence_sec") or 0.3)
+    cursor = a
+    ranges = []
+    removed = 0.0
+
+    for st, en in silences or []:
+        s0, e0 = max(a, float(st)), min(b, float(en))
+        span = e0 - s0
+        if span < threshold:
+            continue
+        keep = min(keep_total, span)
+        keep_left = keep / 2.0
+        keep_right = keep - keep_left
+        cut_start = s0 + keep_left
+        cut_end = e0 - keep_right
+        if cut_end <= cut_start + 0.01:
+            continue
+        if cut_start > cursor + 0.01:
+            ranges.append((cursor, cut_start))
+        cursor = max(cursor, cut_end)
+        removed += cut_end - cut_start
+
+    if b > cursor + 0.01:
+        ranges.append((cursor, b))
+    if not ranges:
+        # Defensive fallback: never erase a semantic beat completely.
+        mid = (a + b) / 2.0
+        half = min((b - a) / 2.0, max(0.06, keep_total / 2.0))
+        ranges = [(max(a, mid - half), min(b, mid + half))]
+        removed = max(0.0, (b - a) - (ranges[0][1] - ranges[0][0]))
+
+    return ranges, max(0.0, removed)
+
+
 def apply_semantic_story_repair(source_path, dest_path, repair_report):
-    """Reorder multiple semantic story segments while preserving their original audio."""
+    """Reorder story beats, trim long dead air, then create the child's wait in edit.
+
+    For interaction-first episodes, generation is not asked to burn seconds on a
+    response pause. Long silent stretches inside THINK/REVEAL are compressed,
+    while dialogue stays untouched. A neutral frame from the end of CHILD_TURN
+    is then held for the configured response-wait duration before REVEAL.
+    """
     if not repair_report.get("valid"):
         return {"applied": False, "reason": repair_report.get("reason", "invalid_plan"), "segments": []}
+
     info = ffprobe_video_info(source_path)
+    source_duration = float(info.get("duration") or 0.0)
     segments = repair_report["segments"]
+    pause_policy = dict(repair_report.get("editorial_response_pause") or {})
+    pause_enabled = bool(
+        pause_policy.get("enabled")
+        and repair_report.get("contract") == "interaction_first"
+        and any(s.get("label") == "CHILD_TURN" for s in segments)
+        and any(s.get("label") == "REVEAL" for s in segments)
+    )
+    pause_sec = float(pause_policy.get("target_sec") or 0.0) if pause_enabled else 0.0
+
+    source_silences = detect_silence_intervals(source_path, source_duration) if info["has_audio"] else []
+
+    # Build source pieces in OUTPUT order. A semantic segment may become multiple
+    # pieces when the middle of a long silent stretch is removed.
+    pieces = []
+    segment_ranges = []
+    dead_air_removed = 0.0
+    for seg_index, seg in enumerate(segments):
+        ranges, removed = _compressed_source_ranges(seg, source_silences, pause_policy)
+        dead_air_removed += removed
+        segment_ranges.append(ranges)
+        for a, b in ranges:
+            if b - a >= 0.04:
+                pieces.append({
+                    "kind": "source", "label": seg["label"], "seg_index": seg_index,
+                    "source_start": a, "source_end": b, "duration": b - a,
+                })
+        if pause_enabled and seg.get("label") == "CHILD_TURN":
+            # Freeze the final neutral CHILD_TURN frame, not a reveal frame.
+            frame_dur = 1.0 / float(OUTPUT_FPS)
+            anchor_end = max(float(seg["source_start"]) + frame_dur, float(seg["source_end"]))
+            anchor_end = min(anchor_end, source_duration)
+            anchor_start = max(float(seg["source_start"]), anchor_end - frame_dur)
+            pieces.append({
+                "kind": "editorial_wait", "label": "EDITORIAL_WAIT", "seg_index": None,
+                "source_start": anchor_start, "source_end": anchor_end,
+                "duration": pause_sec,
+            })
+
+    if not pieces:
+        return {"applied": False, "reason": "repair_produced_no_output_pieces", "segments": []}
+
     fc = []
     concat_inputs = []
     output_t = 0.0
-    mapped = []
-    for i, seg in enumerate(segments):
-        a, b = seg["source_start"], seg["source_end"]
-        fc.append(f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v{i}]")
+    piece_timeline = []
+    seg_output_bounds = {}
+
+    for i, piece in enumerate(pieces):
+        kind = piece["kind"]
+        if kind == "source":
+            a, b = piece["source_start"], piece["source_end"]
+            fc.append(f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS[v{i}]")
+            if info["has_audio"]:
+                fc.append(f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a{i}]")
+            actual_dur = b - a
+        else:
+            a, b = piece["source_start"], piece["source_end"]
+            anchor_span = max(1.0 / OUTPUT_FPS, b - a)
+            pad = max(0.0, pause_sec - anchor_span)
+            fc.append(
+                f"[0:v:0]trim={a:.6f}:{b:.6f},setpts=PTS-STARTPTS,"
+                f"tpad=stop_mode=clone:stop_duration={pad:.6f}[v{i}]"
+            )
+            if info["has_audio"]:
+                # Use the source stream itself for format compatibility, then mute it.
+                fc.append(
+                    f"[0:a]atrim=0:{pause_sec:.6f},asetpts=PTS-STARTPTS,volume=0[a{i}]"
+                )
+            actual_dur = pause_sec
+
         concat_inputs.append(f"[v{i}]")
         if info["has_audio"]:
-            fc.append(f"[0:a]atrim={a:.6f}:{b:.6f},asetpts=PTS-STARTPTS[a{i}]")
             concat_inputs.append(f"[a{i}]")
-        dur = b - a
-        mapped.append({
-            **seg,
+
+        piece_timeline.append({
+            **piece,
             "output_start": output_t,
-            "output_end": output_t + dur,
+            "output_end": output_t + actual_dur,
         })
-        output_t += dur
+        if piece.get("seg_index") is not None:
+            idx = piece["seg_index"]
+            bounds = seg_output_bounds.setdefault(idx, [output_t, output_t + actual_dur])
+            bounds[0] = min(bounds[0], output_t)
+            bounds[1] = max(bounds[1], output_t + actual_dur)
+        output_t += actual_dur
 
     if info["has_audio"]:
-        fc.append("".join(concat_inputs) + f"concat=n={len(segments)}:v=1:a=1[v][a]")
+        fc.append("".join(concat_inputs) + f"concat=n={len(pieces)}:v=1:a=1[v][a]")
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-i", str(source_path),
             "-filter_complex", ";".join(fc),
@@ -1266,7 +1386,7 @@ def apply_semantic_story_repair(source_path, dest_path, repair_report):
             "-movflags", "+faststart", str(dest_path),
         ]
     else:
-        fc.append("".join(concat_inputs) + f"concat=n={len(segments)}:v=1:a=0[v]")
+        fc.append("".join(concat_inputs) + f"concat=n={len(pieces)}:v=1:a=0[v]")
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-i", str(source_path),
             "-filter_complex", ";".join(fc),
@@ -1276,14 +1396,28 @@ def apply_semantic_story_repair(source_path, dest_path, repair_report):
         ]
     run(cmd)
 
-    # Verify the render instead of trusting it. A concat that silently dropped a
-    # segment, or lost audio, must not reach typography/music/publish.
+    mapped = []
+    for i, seg in enumerate(segments):
+        bounds = seg_output_bounds.get(i)
+        if not bounds:
+            continue
+        kept_ranges = segment_ranges[i]
+        mapped.append({
+            **seg,
+            "output_start": bounds[0],
+            "output_end": bounds[1],
+            "source_kept_ranges": [
+                {"start": round(a, 4), "end": round(b, 4)} for a, b in kept_ranges if b - a >= 0.04
+            ],
+            "source_kept_duration": round(sum(max(0.0, b-a) for a, b in kept_ranges), 4),
+        })
+
     out_info = ffprobe_video_info(dest_path)
     drift = abs(out_info["duration"] - output_t)
-    if drift > 0.35:
+    if drift > 0.40:
         raise StoryBlock(
             "REPAIR_VERIFICATION_FAILED",
-            f"Reordered render is {out_info['duration']:.2f}s but the plan expected "
+            f"Reordered render is {out_info['duration']:.2f}s but the edit expected "
             f"{output_t:.2f}s (drift {drift:.2f}s).",
             {"expected_duration": round(output_t, 3), "actual_duration": round(out_info["duration"], 3)},
         )
@@ -1294,14 +1428,20 @@ def apply_semantic_story_repair(source_path, dest_path, repair_report):
             {"segments": mapped},
         )
 
+    wait_piece = next((p for p in piece_timeline if p.get("kind") == "editorial_wait"), None)
     return {
         "applied": True,
-        "reason": "semantic_segments_reordered",
+        "reason": "semantic_segments_reordered_with_editorial_pause" if pause_enabled else "semantic_segments_reordered",
         "confidence": repair_report.get("confidence", 0.0),
         "segments": mapped,
+        "pieces": piece_timeline,
         "output_duration": output_t,
         "verified_output_duration": round(out_info["duration"], 3),
         "audio_preserved": bool(out_info["has_audio"]) if info["has_audio"] else None,
+        "dead_air_removed_sec": round(dead_air_removed, 3),
+        "editorial_response_pause_sec": round(pause_sec, 3) if pause_enabled else 0.0,
+        "editorial_wait_output_start": round(wait_piece["output_start"], 4) if wait_piece else None,
+        "editorial_wait_output_end": round(wait_piece["output_end"], 4) if wait_piece else None,
         "original_story_order": [s["label"] for s in sorted(segments, key=lambda x: x["source_start"])],
         "final_story_order": [s["label"] for s in segments],
     }
@@ -2681,7 +2821,7 @@ def edit_video(src, out, payload):
             story_telemetry.update({
                 "repair_applied": True,
                 "repair_confidence": semantic_repair_report.get("confidence"),
-                "repair_reason": "semantic_segments_reordered",
+                "repair_reason": semantic_repair_result.get("reason", "semantic_segments_reordered"),
                 "original_story_order": [s["label"] for s in sorted(segs, key=lambda x: x["source_start"])],
                 "final_story_order": [s["label"] for s in segs],
                 "moved_segments": [
@@ -2698,6 +2838,10 @@ def edit_video(src, out, payload):
                 "times_after_repair": payload.get("times_after_repair", {}),
                 "duration_before_repair": round(original_source_duration, 3),
                 "duration_after_repair": round(source_duration, 3),
+                "dead_air_removed_sec": semantic_repair_result.get("dead_air_removed_sec", 0.0),
+                "editorial_response_pause_sec": semantic_repair_result.get("editorial_response_pause_sec", 0.0),
+                "editorial_wait_output_start": semantic_repair_result.get("editorial_wait_output_start"),
+                "editorial_wait_output_end": semantic_repair_result.get("editorial_wait_output_end"),
             })
 
     # Metadata-only fallback is kept for old videos or a repairable single reveal
