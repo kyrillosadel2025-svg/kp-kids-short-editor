@@ -1,4 +1,4 @@
-name: KP Kids RAW Video QA - KIE Vision
+name: KP Kids RAW Video QA - KIE Vision V7 Story Repair
 
 on:
   workflow_dispatch:
@@ -19,7 +19,11 @@ on:
 jobs:
   qa:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
+    env:
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      KIE_VISION_ENDPOINT: https://api.kie.ai/gemini-2.5-flash/v1/chat/completions
+      KIE_VISION_MODEL: gemini-2.5-flash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,14 +40,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install opencv-python-headless numpy
 
+      - name: Verify KIE Vision secret
+        shell: bash
+        run: |
+          if [ -z "${KIE_API_KEY:-}" ]; then
+            echo "::warning::KIE_API_KEY is missing for this run. Add it under Settings > Secrets and variables > Actions > Repository secrets."
+          else
+            echo "KIE_API_KEY is available to this workflow run."
+          fi
+
       - name: Analyze RAW video
         id: qa
         continue-on-error: true
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
-          KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
-          KIE_VISION_ENDPOINT: https://api.kie.ai/gemini-2.5-flash/v1/chat/completions
-          KIE_VISION_MODEL: gemini-2.5-flash
         run: |
           set -o pipefail
           python3 raw_video_qc.py \
