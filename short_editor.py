@@ -5,7 +5,7 @@
 # - keeps the generated video as the visual hero and removes template-like overload.
 # - uses deterministic metadata-aware edit plans and editorial styles per episode.
 # - uses silence-aware smart pacing: speech stays natural while real pauses breathe longer.
-# - keeps overall pacing near the old 0.95x target while intro/closure remain normal speed.
+# - keeps the generated body at an overall 0.90x child-friendly pace while intro/closure remain normal speed.
 # - uses direct 9:16 scaling when possible; blurred framing only as a fallback.
 # - ties reveal camera/color emphasis and optional SFX to real/metadata-derived edit points.
 # - adds conservative dialogue focus, SFX ducking, category color polish, adaptive transitions.
@@ -45,7 +45,7 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
-SHORT_PLAYBACK_SPEED = 0.95  # target overall body pace; individual sections vary intelligently
+SHORT_PLAYBACK_SPEED = 0.90  # approved child-friendly overall body pace; intro/closure remain 1.00x
 SPEECH_BASE_SPEED = 0.99
 SHORT_PAUSE_SPEED = 0.95
 MEDIUM_PAUSE_SPEED = 0.91
@@ -54,7 +54,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V18 Full Montage No QA"
+EDITOR_VERSION = "V18 Full Montage No QA + 0.90x Body"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -769,7 +769,7 @@ def _pause_speed(length):
 
 
 def build_pacing_plan(duration, silence_intervals):
-    """ Build deterministic A/V pacing segments. Speech stays very close to natural speed, while real pauses breathe a little more. Speeds are globally normalized so total duration stays close to the previous 0.95x body target instead of growing unpredictably. """
+    """ Build deterministic A/V pacing segments. Speech stays very close to natural speed, while real pauses breathe a little more. Speeds are globally normalized so total duration stays close to the approved 0.90x body target instead of growing unpredictably. """
     if duration <= 0:
         return {"segments": [], "output_duration": 0.0, "target_duration": 0.0}
 
@@ -796,7 +796,7 @@ def build_pacing_plan(duration, silence_intervals):
     factor = current / target_duration if target_duration > 0 else 1.0
     for x in raw:
         # Preserve the relationship (speech faster, pauses slower) while targeting the same overall duration.
-        x["speed"] = min(1.0, max(0.88, x["speed"] * factor))
+        x["speed"] = min(1.0, max(0.86, x["speed"] * factor))
 
     # Recompute output timeline after clamping.
     out_t = 0.0
@@ -2270,7 +2270,8 @@ def main():
     meta = dict(payload)
     meta["editor_version"] = EDITOR_VERSION
     meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
-    meta["pacing_mode"] = "silence_aware_variable_speed"
+    meta["pacing_mode"] = "silence_aware_variable_speed_target_0.90x"
+    meta["approved_body_playback_speed"] = SHORT_PLAYBACK_SPEED
     meta["story_qa_enabled"] = False
     meta["story_repair_enabled"] = False
     meta["generation_triggered"] = False
