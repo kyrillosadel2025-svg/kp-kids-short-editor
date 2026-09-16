@@ -109,10 +109,15 @@ def build_raw(path, order):
         parts = []
         for i, (label, colour, secs, hz) in enumerate(order):
             part = Path(td) / f"p{i}.mp4"
+            audio_src = (
+                f"sine=frequency={hz}:duration={secs}:sample_rate=48000"
+                if hz is not None else
+                f"anullsrc=r=48000:cl=stereo:d={secs}"
+            )
             subprocess.run([
                 "ffmpeg", "-y", "-v", "error",
                 "-f", "lavfi", "-i", f"color=c={colour}:s=360x640:d={secs}:r=24",
-                "-f", "lavfi", "-i", f"sine=frequency={hz}:duration={secs}:sample_rate=48000",
+                "-f", "lavfi", "-i", audio_src,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "128k", "-ac", "2",
                 "-shortest", str(part),
@@ -495,6 +500,10 @@ def test_story_contracts(editor, qc):
 
     order_if = sc.STORY_CONTRACTS["interaction_first"]
     order_rf = sc.STORY_CONTRACTS["reveal_first"]
+    check("interaction_first puts CHILD_TURN before THINK",
+          order_if.index("CHILD_TURN") < order_if.index("THINK"), str(order_if))
+    check("interaction_first puts THINK before REVEAL",
+          order_if.index("THINK") < order_if.index("REVEAL"), str(order_if))
     check("interaction_first puts CHILD_TURN before REVEAL",
           order_if.index("CHILD_TURN") < order_if.index("REVEAL"), str(order_if))
     check("reveal_first puts CHILD_TURN after REVEAL",
@@ -528,6 +537,8 @@ def test_beat_order_audit(editor):
           target.index("CHILD_TURN") < target.index("REVEAL"), str(target))
     check("repaired order keeps the question first",
           target.index("QUESTION") < target.index("CHILD_TURN"), str(target))
+    check("response thinking happens after the invite",
+          target.index("CHILD_TURN") < target.index("THINK") < target.index("REVEAL"), str(target))
 
     # The same beats under a teaching contract are already correct.
     teach_audit = sc.audit_story_order(beats, {"episode_format": "teach colours"}, duration, silences)
@@ -606,8 +617,73 @@ def test_beat_order_repair_gate(editor):
     check("interaction_first refuses child turn after reveal", not rep4["valid"], rep4["reason"])
 
 
+def test_editor_owned_response_pause(editor, workdir):
+    print("\n[14] " + "Interaction-first: trim generated dead air and create wait in edit")
+    # Broken source: the character answers first and then invites the child.
+    # The 4s reveal is deliberately silent dead air, exactly the waste we want
+    # montage to compress instead of preserving.
+    raw = build_raw(workdir / "dead_air_findit.mp4", [
+        ("HOOK",       "blue",   1.0, 300),
+        ("QUESTION",   "green",  2.0, 500),
+        ("REVEAL",     "red",    4.0, None),
+        ("CHILD_TURN", "yellow", 2.0, 700),
+        ("PAYOFF",     "white",  2.0, 900),
+    ])
+    src = probe(raw)
+    payload = {
+        "episode_format": "find-it",
+        "question_line": "Can you find the apple?",
+        "interaction_type": "point at it",
+        "challenge_line": "Your turn - point at it!",
+        "qa_semantic_story": {"status": "CORRECT_REVEAL", "confidence": 0.94},
+        "repair_required": True,
+        "editorial_response_pause": {
+            "enabled": True, "target_sec": 1.2,
+            "dead_air_threshold_sec": 0.8, "max_kept_silence_sec": 0.3,
+        },
+        "story_repair_plan": {
+            "action": "reorder_segments", "repair_kind": "beat_order", "confidence": 0.94,
+            "output_segments": [
+                {"label":"HOOK",       "start_sec":0.0, "end_sec":1.0,  "order":0},
+                {"label":"QUESTION",   "start_sec":1.0, "end_sec":3.0,  "order":1},
+                {"label":"CHILD_TURN", "start_sec":7.0, "end_sec":9.0,  "order":2},
+                {"label":"REVEAL",     "start_sec":3.0, "end_sec":7.0,  "order":3},
+                {"label":"PAYOFF",     "start_sec":9.0, "end_sec":11.0, "order":4},
+            ],
+        },
+    }
+    report = editor.validate_semantic_repair_plan(payload, src["duration"])
+    check("interaction-first dead-air plan validates", report["valid"], report["reason"])
+    if not report["valid"]:
+        return
+
+    out = workdir / "dead_air_findit_fixed.mp4"
+    result = editor.apply_semantic_story_repair(raw, out, report)
+    check("editorial-pause repair applied", result.get("applied"), result.get("reason", ""))
+    check("editor creates about 1.2s response wait",
+          1.0 <= result.get("editorial_response_pause_sec", 0) <= 1.4,
+          str(result.get("editorial_response_pause_sec")))
+    check("long generated silence is actually removed",
+          result.get("dead_air_removed_sec", 0) >= 3.0,
+          str(result.get("dead_air_removed_sec")))
+    fixed = probe(out)
+    check("fixed video is materially shorter than RAW",
+          fixed["duration"] < src["duration"] - 1.5,
+          f"{src['duration']:.2f} -> {fixed['duration']:.2f}")
+    p2 = editor.apply_semantic_repair_time_metadata(payload, result)
+    check("final semantic order is question -> child -> reveal",
+          p2["question_time"] < p2["interaction_time"] < p2["reveal_time"],
+          str(p2.get("times_after_repair")))
+    wait_start = result.get("editorial_wait_output_start")
+    wait_end = result.get("editorial_wait_output_end")
+    check("response wait sits between child turn and reveal",
+          wait_start is not None and wait_end is not None and
+          p2["interaction_time"] < wait_start < wait_end < p2["reveal_time"],
+          f"interaction={p2.get('interaction_time')} wait={wait_start}-{wait_end} reveal={p2.get('reveal_time')}")
+
+
 def test_attached_picture_stream(editor, workdir):
-    print("\n[14] " + "RAW files carrying a cover image still edit")
+    print("\n[15] " + "RAW files carrying a cover image still edit")
     raw = workdir / "with_cover.mp4"
     cover = workdir / "cover.png"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
@@ -665,6 +741,7 @@ def main():
         test_reorder(editor, workdir)
         test_persistent_blocks(editor, workdir)
         test_uncertain_holds(editor, workdir)
+        test_editor_owned_response_pause(editor, workdir)
         test_attached_picture_stream(editor, workdir)
     test_plan_rejections(editor, qc)
     test_story_contracts(editor, qc)
