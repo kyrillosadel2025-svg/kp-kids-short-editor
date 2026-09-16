@@ -1063,6 +1063,21 @@ def analyze(path, payload):
                 f"Violations: {order_audit.get('violations')}"
             )
         })
+    elif str(order_audit.get("reason") or "").startswith("required_beat_not_identified"):
+        # Vision did not label a beat the contract depends on (CHILD_TURN, most
+        # often). Two beats it DID label can still look correctly ordered
+        # relative to each other, so this is NOT the same thing as
+        # ORDER_UNREPAIRABLE above - it must be caught separately or it ships
+        # silently as a false ORDER_OK.
+        missing = str(order_audit.get("reason") or "").split(":", 1)[-1]
+        issues.append({
+            "code":"STORY_REQUIRED_BEAT_NOT_IDENTIFIED",
+            "detail":(
+                f"Vision did not identify required beat(s) [{missing}] for the "
+                f"{order_audit.get('contract')} contract, so beat order cannot be verified. "
+                "Holding for review rather than shipping an unverified story order."
+            )
+        })
 
     qa_pass = len(issues) == 0
     if technical_hold:
