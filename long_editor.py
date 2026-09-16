@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.4 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Converts vertical shorts to 1920x1080 with a blurred side/background fill. - Preserves original speech/audio. - Adds one continuous real-music bed from the existing music/ library. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
+"""KP Kids Long Video Editor V1.5 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Re-cuts vertical shorts into a large 4:3 focus window inside 1920x1080, with smooth character-to-lesson reframing and blurred side fill. - Preserves original speech/audio. - Adds one continuous real-music bed from the existing music/ library. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
 
 import argparse
 import base64
@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-EDITOR_VERSION = "KP Kids Long Editor V1.4.1 - Audio Ducking Split Fix"
+EDITOR_VERSION = "KP Kids Long Editor V1.5 - Smart Landscape Recut FINAL"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
@@ -743,8 +743,8 @@ def normalize_brand_clip(src, dest):
     run(cmd)
 
 
-def normalize_vertical_clip( src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True ):
-    """Smart-pace a Short, then place it untouched in the center of a 16:9 canvas."""
+def normalize_vertical_clip( src, dest, clip=None, clip_index=1, clip_total=1, side_graphics_enabled=True, smart_pacing_enabled=True, qa_sync_enabled=True, smart_landscape_recut_enabled=True ):
+    """Smart-pace a Short and create a child-readable 16:9 landscape re-cut. Default V1.5 mode does NOT shrink the full portrait into the center. Instead it uses a large 4:3 focus crop (1440x1080) over a subdued blurred background. The crop pans smoothly from the character zone during the question to the lesson/object zone around the answer, then settles to a balanced middle frame. The legacy full-portrait composition remains available as a fallback. """
     clip = clip or {}
     source_dur = max(0.5, ffprobe_duration(src))
     silence_intervals = detect_silence_intervals(src, source_dur) if smart_pacing_enabled else []
@@ -776,21 +776,97 @@ def normalize_vertical_clip( src, dest, clip=None, clip_index=1, clip_total=1, s
     fade_out = max(0.0, dur - SEGMENT_FADE)
     qa_timing = build_qa_timing(clip, source_dur, pacing_plan, silence_intervals)
 
-    base_graph = (
-        f"[0:v]split=2[bg][fg];"
-        f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
-        f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=32,eq=brightness=-0.11:saturation=0.82[bg2];"
-        f"[fg]scale=-2:{FOREGROUND_H}:force_original_aspect_ratio=decrease,"
-        f"setsar=1[fg2];"
-        f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base]"
-    )
+    # ------------------------------------------------------------------
+    # SMART LANDSCAPE RECUT
+    # ------------------------------------------------------------------
+    # A full 9:16 frame scaled to 1080p makes the characters too small for
+    # a children's long-form video. V1.5 therefore uses a large 4:3 focus
+    # window. It preserves the source width and crops only vertically, then
+    # scales that crop to 1440x1080. The remaining 240 px on each side are
+    # filled by the subdued blurred source.
+    src_w, src_h = ffprobe_dimensions(paced_src)
+    category = str(clip.get("category") or "").strip().lower()
+    focus_w = 1440
+    focus_h = OUTPUT_H
 
-    graphic_meta = {}
-    if side_graphics_enabled:
-        filters, graphic_meta = build_side_graphics_filters(
+    if smart_landscape_recut_enabled and src_w > 0 and src_h > src_w:
+        crop_w = src_w
+        crop_h = min(src_h, max(2, int(round(src_w * 3.0 / 4.0))))
+        crop_h -= crop_h % 2
+        max_y = max(0, src_h - crop_h)
+
+        # Question = character/face zone. Reveal = teaching-object zone.
+        char_y = int(round(max_y * 0.30))
+        mid_y = int(round(max_y * 0.40))
+        lower_focus_categories = {
+            "alphabet", "letters", "phonics", "numbers", "counting",
+            "shapes", "colors", "patterns", "sorting", "math",
+            "positions", "sizes", "directions", "calendar", "time"
+        }
+        face_focus_categories = {"body", "emotions", "manners", "community"}
+        if category in lower_focus_categories:
+            lesson_y = int(round(max_y * 0.62))
+        elif category in face_focus_categories:
+            lesson_y = int(round(max_y * 0.30))
+        else:
+            lesson_y = int(round(max_y * 0.48))
+
+        ast = float(qa_timing.get("answer_start", dur * 0.38))
+        aen = float(qa_timing.get("answer_end", min(dur - 0.2, ast + 2.2)))
+        transition = min(0.55, max(0.30, dur * 0.035))
+        t1 = max(0.8, ast - transition)
+        t2 = min(max(t1 + transition + 0.5, aen), dur - transition - 0.15)
+
+        # Smooth piecewise pan. Avoid rapid face tracking: the camera only moves
+        # at the semantic question->answer boundaries.
+        yexpr = (
+            f"if(lt(t,{t1:.3f}),{char_y},"
+            f"if(lt(t,{t1+transition:.3f}),{char_y}+({lesson_y}-{char_y})*(t-{t1:.3f})/{transition:.3f},"
+            f"if(lt(t,{t2:.3f}),{lesson_y},"
+            f"if(lt(t,{t2+transition:.3f}),{lesson_y}+({mid_y}-{lesson_y})*(t-{t2:.3f})/{transition:.3f},{mid_y}))))"
+        )
+
+        base_graph = (
+            f"[0:v]split=2[bg][focus];"
+            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=38,eq=brightness=-0.15:saturation=0.72[bg2];"
+            f"[focus]crop={crop_w}:{crop_h}:0:'{yexpr}',"
+            f"scale={focus_w}:{focus_h}:flags=lanczos,setsar=1[focus2];"
+            f"[bg2][focus2]overlay=(W-w)/2:0[base]"
+        )
+        # The old large side captions would cover the enlarged teaching frame.
+        # In recut mode the picture is the lesson, so suppress those overlays.
+        effective_side_graphics = False
+        recut_meta = {
+            "mode": "smart_4x3_recut",
+            "source_size": f"{src_w}x{src_h}",
+            "focus_size": f"{focus_w}x{focus_h}",
+            "crop_size": f"{crop_w}x{crop_h}",
+            "character_y": char_y,
+            "lesson_y": lesson_y,
+            "settle_y": mid_y,
+            "answer_start": round(ast, 3),
+            "answer_end": round(aen, 3),
+        }
+    else:
+        base_graph = (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=32,eq=brightness=-0.11:saturation=0.82[bg2];"
+            f"[fg]scale=-2:{FOREGROUND_H}:force_original_aspect_ratio=decrease,"
+            f"setsar=1[fg2];"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base]"
+        )
+        effective_side_graphics = side_graphics_enabled
+        recut_meta = {"mode": "legacy_full_portrait"}
+
+    graphic_meta = {"landscape_recut": recut_meta}
+    if effective_side_graphics:
+        filters, side_meta = build_side_graphics_filters(
             clip, dur, clip_index, clip_total, Path(dest).parent,
             qa_timing=qa_timing, qa_sync_enabled=qa_sync_enabled
         )
+        graphic_meta.update(side_meta)
         chain = "[base]"
         for i, flt in enumerate(filters):
             out_label = f"g{i}"
@@ -996,11 +1072,13 @@ def main():
             side_graphics_enabled = payload_bool(payload, "side_graphics_enabled", True)
             smart_pacing_enabled = payload_bool(payload, "smart_pacing_enabled", True)
             qa_sync_enabled = payload_bool(payload, "qa_sync_enabled", True)
+            smart_landscape_recut_enabled = payload_bool(payload, "smart_landscape_recut_enabled", True)
             dur, graphic_meta, pacing_meta = normalize_vertical_clip(
                 raw, norm, clip=clip, clip_index=idx, clip_total=len(clips),
                 side_graphics_enabled=side_graphics_enabled,
                 smart_pacing_enabled=smart_pacing_enabled,
-                qa_sync_enabled=qa_sync_enabled
+                qa_sync_enabled=qa_sync_enabled,
+                smart_landscape_recut_enabled=smart_landscape_recut_enabled
             )
             normalized.append(norm)
             used.append({
@@ -1097,9 +1175,11 @@ def main():
         "clip_short_ids": [u["short_id"] for u in used if u["short_id"]],
         "clips_failed": failed,
         "music_result": music_result,
-        "side_graphics_enabled": payload_bool(payload, "side_graphics_enabled", True),
-        "side_graphics_style": "category left + spoken question/answer right",
+        "side_graphics_enabled": payload_bool(payload, "side_graphics_enabled", True) and not payload_bool(payload, "smart_landscape_recut_enabled", True),
+        "side_graphics_style": "suppressed in Smart Landscape Recut to keep characters/lesson unobstructed" if payload_bool(payload, "smart_landscape_recut_enabled", True) else "category left + spoken question/answer right",
         "smart_pacing_enabled": payload_bool(payload, "smart_pacing_enabled", True),
+        "smart_landscape_recut_enabled": payload_bool(payload, "smart_landscape_recut_enabled", True),
+        "landscape_recut_style": "large 4:3 focus window + smooth character-to-lesson vertical pan + blurred side fill",
         "qa_sync_enabled": payload_bool(payload, "qa_sync_enabled", True),
         "pacing_mode": "silence-aware variable speed, Shorts-inspired",
         "branding": brand_meta,
