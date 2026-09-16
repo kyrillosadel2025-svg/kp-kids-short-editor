@@ -1,33 +1,56 @@
-name: KP Kids RAW Video QA - KIE Vision V4
+# KP Kids RAW QA workflow
+# Re-index marker: v1.1 — 2026-09-16
+# IMPORTANT: upload/replace this file at:
+# .github/workflows/qa-raw-short.yml
+
+name: KP Kids RAW Video QA
+
+run-name: "KP Kids RAW QA · ${{ github.run_id }}"
 
 on:
   workflow_dispatch:
     inputs:
       payload_b64:
-        description: Base64 JSON payload
+        description: "Base64 JSON payload"
         required: true
         type: string
       callback_url:
-        description: n8n Wait resume URL
+        description: "n8n Wait resume URL"
         required: true
         type: string
       callback_token:
-        description: callback auth token
+        description: "callback auth token"
         required: true
         type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: "kp-kids-raw-qa-${{ github.run_id }}"
+  cancel-in-progress: false
+
 jobs:
   qa:
+    name: Analyze RAW Short
     runs-on: ubuntu-latest
     timeout-minutes: 12
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Verify QA script exists
+        run: |
+          test -f raw_video_qc.py || {
+            echo "::error::raw_video_qc.py is missing from repository root"
+            exit 1
+          }
 
       - name: Install FFmpeg and OpenCV
         run: |
@@ -41,9 +64,6 @@ jobs:
         continue-on-error: true
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
-          KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
-          KIE_VISION_ENDPOINT: https://api.kie.ai/gemini-2.5-flash/v1/chat/completions
-          KIE_VISION_MODEL: gemini-2.5-flash
         run: |
           set -o pipefail
           python3 raw_video_qc.py \
@@ -61,40 +81,55 @@ jobs:
           GH_REPOSITORY: ${{ github.repository }}
         run: |
           python3 - <<'PY'
-          import base64, json, os, urllib.request
-          payload = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          import base64
+          import json
+          import os
+          import urllib.request
+
+          payload = json.loads(
+              base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8")
+          )
+
           try:
-              result = json.load(open("raw_qa_result.json", encoding="utf-8"))
+              with open("raw_qa_result.json", encoding="utf-8") as f:
+                  result = json.load(f)
           except Exception:
               detail = ""
               try:
-                  lines = open("raw_qa.log", encoding="utf-8", errors="replace").read().splitlines()
+                  with open("raw_qa.log", encoding="utf-8", errors="replace") as f:
+                      lines = f.read().splitlines()
                   detail = "\n".join(lines[-25:])[-1800:]
               except Exception:
                   pass
+
               result = {
                   "qa_pass": False,
                   "qa_status": "error",
-                  "issues": [{"code":"QA_RUNTIME_ERROR","detail":detail or "RAW QA did not produce a result"}],
+                  "issues": [{
+                      "code": "QA_RUNTIME_ERROR",
+                      "detail": detail or "RAW QA did not produce a result",
+                  }],
                   "warnings": [],
-                  "metrics": {}
+                  "metrics": {},
               }
+
           body = {
               **payload,
               **result,
               "github_run_id": os.environ["GH_RUN_ID"],
               "github_repository": os.environ["GH_REPOSITORY"],
           }
-          data = json.dumps(body).encode("utf-8")
+
           req = urllib.request.Request(
               os.environ["CALLBACK_URL"],
-              data=data,
+              data=json.dumps(body).encode("utf-8"),
               method="POST",
               headers={
-                  "Content-Type":"application/json",
-                  "x-kp-kids-callback":os.environ["CALLBACK_TOKEN"],
+                  "Content-Type": "application/json",
+                  "x-kp-kids-callback": os.environ["CALLBACK_TOKEN"],
               },
           )
+
           with urllib.request.urlopen(req, timeout=60) as resp:
               print(resp.status, resp.read().decode("utf-8", errors="replace"))
           PY
