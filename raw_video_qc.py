@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, base64, json, math, os, re, shutil, subprocess, tempfile, urllib.request, urllib.error
+import argparse, base64, json, math, os, re, shutil, subprocess, tempfile, time, urllib.request, urllib.error
 from pathlib import Path
 import cv2
 import numpy as np
@@ -147,7 +147,13 @@ def _json_from_model_text(text):
 
 
 def _kie_chat_output_text(obj):
-    """Extract assistant text from KIE chat responses. KIE documents the OpenAI-compatible success shape with choices at the root, but some gateway/provider responses can arrive wrapped under data. Accept both, and surface KIE's own code/msg/error instead of hiding it behind a KeyError so Telegram shows the real cause. """
+    """Extract assistant text from KIE chat responses.
+
+    KIE documents the OpenAI-compatible success shape with choices at the root,
+    but some gateway/provider responses can arrive wrapped under data.  Accept
+    both, and surface KIE's own code/msg/error instead of hiding it behind a
+    KeyError so Telegram shows the real cause.
+    """
     if not isinstance(obj, dict):
         raise RuntimeError(f"KIE returned non-object JSON: {type(obj).__name__}")
 
@@ -225,86 +231,120 @@ def _kie_chat_output_text(obj):
 
 
 def _normalize_kie_verdict(verdict):
-    """Normalize KIE's observed reveal_assessment shape and our preferred schema. KIE may return either the exact JSON requested by the prompt or a provider- generated object like {"reveal_assessment": {...}}. Do not invent a model confidence when KIE did not provide one; an explicit early-reveal classification is still treated as blocking. """
+    """Normalize KIE semantic story responses into one stable structure."""
     if not isinstance(verdict, dict):
         raise RuntimeError("KIE verdict is not a JSON object")
 
-    # Unwrap common containers first.
     for key in ("data", "result", "output"):
         value = verdict.get(key)
-        if isinstance(value, dict):
-            # Prefer a nested assessment/status object if present.
-            if "reveal_assessment" in value or "status" in value or "early_reveal_classification" in value:
-                verdict = value
-                break
-
-    # Preferred schema from our prompt.
-    if "status" in verdict:
-        return verdict
+        if isinstance(value, dict) and (
+            "reveal_assessment" in value or "status" in value
+            or "early_reveal_classification" in value or "story_segments" in value
+        ):
+            verdict = value
+            break
 
     assessment = verdict.get("reveal_assessment")
     if not isinstance(assessment, dict):
-        # Some responses may return the assessment object directly.
-        if "early_reveal_classification" in verdict:
-            assessment = verdict
-        else:
-            raise RuntimeError("KIE verdict missing status/reveal_assessment")
+        assessment = verdict
 
     raw_class = str(
-        assessment.get("early_reveal_classification")
+        assessment.get("status")
+        or assessment.get("early_reveal_classification")
         or assessment.get("classification")
-        or assessment.get("status")
         or "UNCERTAIN"
     ).strip().upper().replace(" ", "_").replace("-", "_")
 
-    # Robust mapping for observed/truncated/provider wording.
-    if raw_class.startswith("PERSISTENT_EARLY_REVE"):
+    if raw_class.startswith("PERSISTENT_EARLY_REVE") or ("PERSISTENT" in raw_class and "EARLY" in raw_class):
         status = "PERSISTENT_EARLY_REVEAL"
     elif raw_class.startswith("EARLY_REVEAL_MOVABLE") or raw_class.startswith("MOVABLE_EARLY_REVEAL"):
         status = "EARLY_REVEAL_MOVABLE"
     elif raw_class.startswith("CORRECT_REVEAL") or raw_class in {"PASS", "OK", "SAFE"}:
         status = "CORRECT_REVEAL"
-    elif "PERSISTENT" in raw_class and "EARLY" in raw_class:
-        status = "PERSISTENT_EARLY_REVEAL"
     elif "EARLY" in raw_class and "REVEAL" in raw_class:
         status = "EARLY_REVEAL_MOVABLE"
     else:
         status = "UNCERTAIN"
 
-    conf = assessment.get("confidence")
-    try:
-        conf = max(0.0, min(1.0, float(conf))) if conf is not None else None
-    except Exception:
-        conf = None
+    def fnum(*values):
+        for value in values:
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except Exception:
+                pass
+        return None
 
-    reveal_t = assessment.get("intended_reveal_timing_in_seconds")
-    if reveal_t is None:
-        reveal_t = assessment.get("estimated_reveal_time_sec")
+    conf = fnum(assessment.get("confidence"), verdict.get("confidence"))
+    if conf is not None:
+        conf = max(0.0, min(1.0, conf))
 
-    first_t = assessment.get("first_answer_visible_time_sec")
-    if first_t is None:
-        first_t = assessment.get("first_visible_time_sec")
+    reveal_t = fnum(
+        assessment.get("intended_reveal_timing_in_seconds"),
+        assessment.get("estimated_reveal_time_sec"),
+        assessment.get("reveal_time_sec"),
+        verdict.get("estimated_reveal_time_sec"),
+        verdict.get("reveal_time_sec"),
+    )
+    question_t = fnum(
+        assessment.get("question_time_sec"),
+        assessment.get("estimated_question_time_sec"),
+        verdict.get("question_time_sec"),
+    )
+    interaction_t = fnum(
+        assessment.get("interaction_time_sec"),
+        assessment.get("child_turn_time_sec"),
+        verdict.get("interaction_time_sec"),
+    )
+    first_t = fnum(
+        assessment.get("first_answer_visible_time_sec"),
+        assessment.get("first_visible_time_sec"),
+        verdict.get("first_answer_visible_time_sec"),
+    )
+
+    story_segments = verdict.get("story_segments")
+    if not isinstance(story_segments, list):
+        story_segments = assessment.get("story_segments")
+    if not isinstance(story_segments, list):
+        story_segments = []
+
+    repair_plan = verdict.get("repair_plan")
+    if not isinstance(repair_plan, dict):
+        repair_plan = assessment.get("repair_plan")
+    if not isinstance(repair_plan, dict):
+        repair_plan = {}
 
     details = (
-        assessment.get("details")
-        or assessment.get("reason")
-        or assessment.get("explanation")
-        or ""
+        assessment.get("reason") or assessment.get("details")
+        or assessment.get("explanation") or verdict.get("reason") or ""
     )
 
     return {
         "status": status,
         "confidence": conf,
-        "answer_visible_before_reveal": status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"},
+        "answer_visible_before_reveal": bool(
+            assessment.get("answer_visible_before_reveal",
+                           status in {"EARLY_REVEAL_MOVABLE", "PERSISTENT_EARLY_REVEAL"})
+        ),
         "first_answer_visible_time_sec": first_t if first_t is not None else -1,
         "estimated_reveal_time_sec": reveal_t if reveal_t is not None else -1,
-        "persistent": status == "PERSISTENT_EARLY_REVEAL",
+        "question_time_sec": question_t,
+        "interaction_time_sec": interaction_t,
+        "persistent": bool(assessment.get("persistent", status == "PERSISTENT_EARLY_REVEAL")),
         "reason": str(details),
-        "provider_shape": "reveal_assessment",
+        "story_segments": story_segments,
+        "repair_plan": repair_plan,
+        "provider_shape": "reveal_assessment" if "reveal_assessment" in verdict else "direct",
     }
 
 def semantic_story_qa(path, payload, duration):
-    """Semantic story QA using KIE Gemini multimodal chat. KIE documents Gemini 2.5 Flash's OpenAI-compatible chat endpoint as accepting media URLs through the image_url content shape, including video URLs. The same KIE API key used by the project is supplied through KIE_API_KEY. """
+    """Semantic story QA using KIE Gemini multimodal chat.
+
+    KIE documents Gemini 2.5 Flash's OpenAI-compatible chat endpoint as accepting
+    media URLs through the image_url content shape, including video URLs.
+    The same KIE API key used by the project is supplied through KIE_API_KEY.
+    """
     answer = str(
         payload.get("expected_answer_visual")
         or payload.get("answer_line")
@@ -366,8 +406,65 @@ def semantic_story_qa(path, payload, duration):
     if reveal_time not in (None, ""):
         timing_hint = f"approximately {reveal_time} seconds"
 
-    prompt = f"""You are a strict visual-story QA system for a children's quiz/learning Short. Analyze the attached FULL VIDEO chronologically, including visible frames and dialogue/audio when available. Question: {question or '[not supplied]'} Correct answer / expected visual answer: {answer} Reveal line: {reveal_line or '[not supplied]'} Intended reveal timing: {timing_hint} Episode format: {payload.get('episode_format','')} Start policy: {payload.get('start_policy','withhold-result')} Dialogue timeline: {payload.get('dialogue_timeline','')} Video duration: {duration:.2f}s CRITICAL RULE: The CORRECT ANSWER must NOT be visible, identifiable, readable, or otherwise visually disclosed BEFORE the intended answer/reveal moment. It is allowed to appear at the reveal moment and after it. Do NOT use the question moment as the cutoff. The cutoff is the ANSWER/REVEAL moment. A decorative/background object still counts as an early reveal if a child could identify it as the correct answer. A silhouette, reflection, label, prop, screen image, sign, or object in a character's hand also counts if it gives away the answer. Classify exactly one: - CORRECT_REVEAL: answer is withheld until the intended reveal, then appears at/after reveal. - EARLY_REVEAL_MOVABLE: answer appears before reveal only in a brief isolated segment and is otherwise withheld; editing could plausibly move/remove that segment. - PERSISTENT_EARLY_REVEAL: answer is visible from the opening, repeatedly, or for a substantial portion before reveal; normal editing cannot cleanly fix it. - UNCERTAIN: evidence is insufficient or ambiguous. Be conservative: if the answer is clearly on screen before reveal, do not mark CORRECT_REVEAL. Return only JSON matching the requested schema."""
+    prompt = f"""You are the semantic story editor/QA for a 15-second KP Kids preschool video.
+Watch the FULL VIDEO chronologically and use BOTH the visible video and spoken dialogue when available.
 
+Question: {question or '[not supplied]'}
+Correct answer / expected visual answer: {answer}
+Reveal line: {reveal_line or '[not supplied]'}
+Intended reveal timing: {timing_hint}
+Episode format: {payload.get('episode_format','')}
+Start policy: {payload.get('start_policy','withhold-result')}
+Dialogue timeline: {payload.get('dialogue_timeline','')}
+Video duration: {duration:.2f}s
+
+NON-NEGOTIABLE STORY RULE:
+The correct answer must NOT be visible, identifiable, readable, named on screen, reflected, silhouetted, held by a character, highlighted, or otherwise disclosed BEFORE the intended ANSWER/REVEAL moment.
+The cutoff is the ANSWER/REVEAL moment, NOT the question moment.
+
+First classify the reveal:
+- CORRECT_REVEAL: answer is withheld until the intended reveal.
+- EARLY_REVEAL_MOVABLE: the answer appears early only in one or more isolated clean segments and the story can be repaired by cutting/reordering without duplicating dialogue.
+- PERSISTENT_EARLY_REVEAL: the answer is visible from the opening, repeated across much of the pre-reveal story, or baked into the scene so editing cannot hide it.
+- UNCERTAIN: not enough evidence.
+
+Then identify story beats with timestamps whenever they are clear:
+HOOK, QUESTION, THINK, REVEAL, REINFORCE, CHILD_TURN, PAYOFF.
+
+If and ONLY IF status is EARLY_REVEAL_MOVABLE, create a conservative repair_plan:
+- action must be "reorder_segments".
+- confidence 0..1.
+- output_segments must be the exact SOURCE ranges to keep, in the desired OUTPUT order.
+- Every output segment needs: label, start_sec, end_sec, order.
+- QUESTION must come before THINK (if present), then REVEAL, then CHILD_TURN/PAYOFF.
+- Never overlap source ranges.
+- Preserve dialogue/audio with each segment.
+- Do not invent missing footage.
+- Do not repair a persistent spoiler.
+
+Return ONLY a JSON object with this shape:
+{{
+  "status":"CORRECT_REVEAL|EARLY_REVEAL_MOVABLE|PERSISTENT_EARLY_REVEAL|UNCERTAIN",
+  "confidence":0.0,
+  "answer_visible_before_reveal":false,
+  "first_answer_visible_time_sec":-1,
+  "question_time_sec":-1,
+  "estimated_reveal_time_sec":-1,
+  "interaction_time_sec":-1,
+  "persistent":false,
+  "reason":"short factual explanation",
+  "story_segments":[
+    {{"label":"QUESTION","start_sec":1.2,"end_sec":2.8}}
+  ],
+  "repair_plan":{{
+    "action":"keep|reorder_segments|block",
+    "confidence":0.0,
+    "reason":"...",
+    "output_segments":[]
+  }}
+}}
+
+Be conservative. If clean source boundaries are not trustworthy, do NOT create a reorder plan."""
     schema = {
         "type": "json_schema",
         "json_schema": {
@@ -431,45 +528,87 @@ def semantic_story_qa(path, payload, duration):
         headers={
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
-            "User-Agent": "KP-Kids-RAW-QA/5.0",
+            "User-Agent": "KP-Kids-RAW-QA/7.0",
         },
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            raw_text = resp.read().decode("utf-8", errors="replace")
-            obj = json.loads(raw_text)
-        verdict = _normalize_kie_verdict(_json_from_model_text(_kie_chat_output_text(obj)))
-    except urllib.error.HTTPError as e:
+    # Retry only transient KIE/provider/network failures.
+    retry_delays = (0, 12, 30, 60)
+    last_error = None
+    raw_text = ""
+    verdict = None
+    for attempt, delay in enumerate(retry_delays, start=1):
+        if delay:
+            time.sleep(delay)
         try:
-            detail = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            detail = ""
-        detail = re.sub(r"\\s+", " ", detail).strip()[:600]
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                raw_text = resp.read().decode("utf-8", errors="replace")
+                obj = json.loads(raw_text)
+
+            if isinstance(obj, dict):
+                code = obj.get("code")
+                msg = str(obj.get("msg") or obj.get("message") or "")
+                transient_200 = (
+                    code in {429, 500, 502, 503, 504}
+                    or any(x in msg.lower() for x in (
+                        "network error", "try again later", "temporarily",
+                        "timeout", "timed out", "busy", "rate limit"
+                    ))
+                )
+                if transient_200 and attempt < len(retry_delays):
+                    print(f"KIE Vision transient response on attempt {attempt}: code={code} msg={msg[:180]}")
+                    last_error = f"KIE transient response code={code}: {msg}"
+                    continue
+
+            verdict = _normalize_kie_verdict(_json_from_model_text(_kie_chat_output_text(obj)))
+            last_error = None
+            break
+
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            detail = re.sub(r"\s+", " ", detail).strip()[:600]
+            last_error = f"KIE_vision_http_{e.code}: {detail or e.reason}"
+            if e.code in {429, 500, 502, 503, 504} and attempt < len(retry_delays):
+                print(f"KIE Vision HTTP transient error on attempt {attempt}: {last_error}")
+                continue
+            return {
+                "status": "ERROR", "confidence": 0.0, "reason": last_error,
+                "blocking": True, "retryable": e.code in {429, 500, 502, 503, 504},
+                "provider": "kie.ai", "model": model_name, "attempts": attempt,
+            }
+
+        except urllib.error.URLError as e:
+            last_error = f"KIE_vision_network_error: {e.reason}"
+            if attempt < len(retry_delays):
+                print(f"KIE Vision network transient error on attempt {attempt}: {last_error}")
+                continue
+
+        except Exception as e:
+            raw_snippet = re.sub(r"\s+", " ", str(raw_text)).strip()[:900] if raw_text else ""
+            reason = f"KIE_vision_api_or_parse_error: {type(e).__name__}: {e}"
+            if raw_snippet:
+                reason += f" | raw={raw_snippet}"
+            low = reason.lower()
+            last_error = reason[:1600]
+            if any(x in low for x in ("network error", "try again later", "temporarily", "timeout", "timed out", "busy", "rate limit")) and attempt < len(retry_delays):
+                print(f"KIE Vision transient provider/parse error on attempt {attempt}: {last_error[:500]}")
+                continue
+            return {
+                "status": "ERROR", "confidence": 0.0, "reason": last_error,
+                "blocking": True,
+                "retryable": any(x in low for x in ("network error", "try again later", "temporar", "timeout", "busy", "rate limit")),
+                "provider": "kie.ai", "model": model_name, "attempts": attempt,
+            }
+
+    if verdict is None:
         return {
-            "status": "ERROR",
-            "confidence": 0.0,
-            "reason": f"KIE_vision_http_{e.code}: {detail or e.reason}",
-            "blocking": True,
-            "provider": "kie.ai",
-            "model": model_name,
-        }
-    except Exception as e:
-        raw_snippet = ""
-        try:
-            raw_snippet = re.sub(r"\s+", " ", str(raw_text)).strip()[:900]
-        except Exception:
-            pass
-        reason = f"KIE_vision_api_or_parse_error: {type(e).__name__}: {e}"
-        if raw_snippet:
-            reason += f" | raw={raw_snippet}"
-        return {
-            "status": "ERROR",
-            "confidence": 0.0,
-            "reason": reason[:1600],
-            "blocking": True,
-            "provider": "kie.ai",
-            "model": model_name,
+            "status": "ERROR", "confidence": 0.0,
+            "reason": (last_error or "KIE Vision failed after transient retries")[:1600],
+            "blocking": True, "retryable": True, "provider": "kie.ai", "model": model_name,
+            "attempts": len(retry_delays),
         }
 
     status = str(verdict.get("status") or "UNCERTAIN").upper()
@@ -492,18 +631,46 @@ def semantic_story_qa(path, payload, duration):
     # confidence, block it rather than letting it pass because of a fabricated 0.
     blocking = explicit_early and (conf is None or conf >= 0.72)
 
+    repair_plan = verdict.get("repair_plan") if isinstance(verdict.get("repair_plan"), dict) else {}
+    story_segments = verdict.get("story_segments") if isinstance(verdict.get("story_segments"), list) else []
+
+    repair_valid = False
+    if status == "EARLY_REVEAL_MOVABLE" and repair_plan.get("action") == "reorder_segments":
+        segs = repair_plan.get("output_segments")
+        try:
+            rconf = float(repair_plan.get("confidence", conf if conf is not None else 0.0) or 0.0)
+        except Exception:
+            rconf = 0.0
+        if isinstance(segs, list) and 2 <= len(segs) <= 10 and rconf >= 0.82:
+            labels = [str(x.get("label") or "").upper().replace("-", "_") for x in segs if isinstance(x, dict)]
+            repair_valid = "QUESTION" in labels and "REVEAL" in labels and labels.index("QUESTION") < labels.index("REVEAL")
+
+    # Persistent reveal always blocks. A movable reveal is allowed through only
+    # when the model supplied a high-confidence, machine-verifiable repair plan.
+    blocking = (
+        status == "PERSISTENT_EARLY_REVEAL"
+        or (status == "EARLY_REVEAL_MOVABLE" and not repair_valid)
+        or status == "UNCERTAIN"
+    )
+
     return {
         "status": status,
         "confidence": round(conf, 3) if conf is not None else None,
         "blocking": blocking,
+        "repair_required": bool(status == "EARLY_REVEAL_MOVABLE" and repair_valid),
+        "repair_plan": repair_plan if repair_valid else {},
+        "story_segments": story_segments,
         "answer_visible_before_reveal": bool(verdict.get("answer_visible_before_reveal", False)),
         "first_answer_visible_time": float(verdict.get("first_answer_visible_time_sec", -1) if verdict.get("first_answer_visible_time_sec") not in (None, "") else -1),
+        "question_time_sec": verdict.get("question_time_sec"),
         "estimated_reveal_time": float(verdict.get("estimated_reveal_time_sec", -1) if verdict.get("estimated_reveal_time_sec") not in (None, "") else -1),
+        "interaction_time_sec": verdict.get("interaction_time_sec"),
         "persistent": bool(verdict.get("persistent", status == "PERSISTENT_EARLY_REVEAL")),
-        "reason": str(verdict.get("reason") or "")[:700],
+        "reason": str(verdict.get("reason") or "")[:900],
         "provider": "kie.ai",
         "model": model_name,
         "endpoint": endpoint,
+        "attempts": attempt,
     }
 
 def analyze(path, payload):
@@ -562,16 +729,36 @@ def analyze(path, payload):
             issues.append({"code":"AUDIO_TOO_QUIET","detail":f"Mean {mean_db:.1f} dB"})
 
     semantic = semantic_story_qa(path, payload, duration)
-    if semantic.get("blocking"):
+    sem_status = str(semantic.get("status") or "UNCERTAIN").upper()
+    technical_hold = False
+    if sem_status == "ERROR":
+        technical_hold = bool(semantic.get("retryable", True))
+        code = "KIE_VISION_TEMPORARY_FAILURE" if technical_hold else "SEMANTIC_VISION_ERROR"
+        issues.append({"code":code,"detail":semantic.get("reason","Semantic Vision error")})
+    elif sem_status == "PERSISTENT_EARLY_REVEAL":
         sem_conf = semantic.get("confidence")
         conf_suffix = f" (confidence={sem_conf:.2f})" if isinstance(sem_conf, (int, float)) else ""
-        issues.append({"code":semantic.get("status","SEMANTIC_STORY_QA_FAIL"),"detail":f"{semantic.get('reason','')}{conf_suffix}"})
-    elif semantic.get("status") in {"UNCERTAIN","SKIPPED"}:
-        warnings.append({"code":"SEMANTIC_STORY_"+semantic.get("status","UNCERTAIN"),"detail":semantic.get("reason","")})
+        issues.append({"code":"PERSISTENT_EARLY_REVEAL","detail":f"{semantic.get('reason','')}{conf_suffix}"})
+    elif sem_status == "EARLY_REVEAL_MOVABLE":
+        if semantic.get("repair_required") and semantic.get("repair_plan"):
+            warnings.append({
+                "code":"EARLY_REVEAL_REPAIRABLE",
+                "detail":f"Semantic editor repair plan approved at confidence={semantic.get('confidence')}; montage must reorder before publish."
+            })
+        else:
+            issues.append({"code":"EARLY_VISUAL_REVEAL","detail":"Early reveal detected but no safe high-confidence repair plan was produced."})
+    elif sem_status in {"UNCERTAIN","SKIPPED"}:
+        issues.append({"code":"SEMANTIC_VISION_NOT_RUN","detail":semantic.get("reason","Semantic story result uncertain")})
 
+    qa_pass = len(issues) == 0
+    qa_status = "technical_hold" if technical_hold else ("pass_repairable" if qa_pass and semantic.get("repair_required") else ("pass" if qa_pass else "fail"))
     return {
-        "qa_pass": len(issues) == 0,
-        "qa_status": "pass" if not issues else "fail",
+        "qa_pass": qa_pass,
+        "qa_status": qa_status,
+        "repair_required": bool(semantic.get("repair_required")),
+        "story_repair_plan": semantic.get("repair_plan") if isinstance(semantic.get("repair_plan"), dict) else {},
+        "story_segments": semantic.get("story_segments") if isinstance(semantic.get("story_segments"), list) else [],
+        "semantic_story": semantic,
         "issues": issues,
         "warnings": warnings,
         "metrics": {
