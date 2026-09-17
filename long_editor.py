@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
-INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+INTRO_DRIVE_FILE_ID = "13X7Mgifa-CLrcPg1Fz9Q5bejn8XsYlrH"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
