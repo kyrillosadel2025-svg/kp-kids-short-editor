@@ -54,7 +54,7 @@ MIN_PACING_SEGMENT = 0.08
 SILENCE_DB = -33
 SILENCE_MIN_DURATION = 0.22
 
-EDITOR_VERSION = "V18 Full Montage No QA + 0.90x Body"
+EDITOR_VERSION = "V19 Growth Overlay Contract + 1080p HQ Upload Master"
 TARGET_LUFS = -15.0
 TARGET_TRUE_PEAK_DB = -1.5
 MAX_ZOOM = 1.03
@@ -65,7 +65,14 @@ SAFE_LEFT = 70
 SAFE_RIGHT = 170
 OUTPUT_W = 1080
 OUTPUT_H = 1920
-OUTPUT_FPS = 24
+OUTPUT_FPS = 30
+OUTPUT_CRF = 18
+OUTPUT_PRESET = "medium"
+OUTPUT_PROFILE = "high"
+OUTPUT_LEVEL = "4.2"
+OUTPUT_MAXRATE = "10M"
+OUTPUT_BUFSIZE = "20M"
+OUTPUT_AUDIO_BITRATE = "192k"
 INTRO_TARGET_SECONDS = 3.25
 CLOSURE_TARGET_SECONDS = 3.40
 MIN_BRAND_CLIP_SECONDS = 3.00
@@ -1024,6 +1031,14 @@ def build_edit_plan(payload, duration):
     if style == "CLEAN_DISCOVERY" and h % 4 == 0:
         show_keyword = False
 
+    # Growth Engine v4+ sends an explicit overlay contract. When present, it is
+    # authoritative: disable the older inferred opening/keyword cards so the
+    # viewer never sees duplicate or contradictory text.
+    has_overlay_contract = bool(overlay_contract(payload))
+    if has_overlay_contract:
+        opening = "none"
+        show_keyword = False
+
     use_progress = style == "COUNT_AND_PLAY" and category in {"counting", "numbers", "patterns"}
     camera_mode = {
         "CLEAN_DISCOVERY": "REVEAL_PUSH",
@@ -1044,6 +1059,7 @@ def build_edit_plan(payload, duration):
         "camera_mode": camera_mode,
         "end_card_style": "none",
         "use_reveal_sfx": show_keyword and style in {"PLAYFUL_QUIZ", "COUNT_AND_PLAY"},
+        "overlay_contract": has_overlay_contract,
     }
 
 
@@ -1055,6 +1071,97 @@ def build_text_plan(payload, edit_plan):
         "topic": topic[:34],
         "keyword": keyword_from_lesson(payload)[:18],
     }
+
+
+def flag_enabled(value, default=True):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return bool(default)
+
+
+def overlay_contract(payload, pacing_plan=None, duration=None):
+    """Normalize n8n's editor_overlay_plan into output-timeline cues.
+
+    n8n describes cues against the original 15-second generated body. The editor
+    may stretch quiet/speech segments to the 0.90x child pace, so every cue is
+    remapped through the actual pacing plan before FFmpeg receives it.
+    """
+    if not flag_enabled(payload.get("text_overlay_enabled"), True):
+        return []
+    plan = payload.get("editor_overlay_plan") or {}
+    if not isinstance(plan, dict) or not flag_enabled(plan.get("enabled"), False):
+        return []
+    raw_cues = plan.get("cues") or []
+    if not isinstance(raw_cues, list):
+        return []
+
+    out = []
+    for i, cue in enumerate(raw_cues[:10]):
+        if not isinstance(cue, dict):
+            continue
+        txt = str(cue.get("text") or "").strip()
+        if not txt:
+            continue
+        try:
+            st = float(cue.get("start", 0.0))
+            en = float(cue.get("end", st + 1.0))
+        except (TypeError, ValueError):
+            continue
+        if en <= st:
+            en = st + 0.5
+        if pacing_plan:
+            st = map_source_time_to_output(st, pacing_plan)
+            en = map_source_time_to_output(en, pacing_plan)
+        if duration is not None:
+            st = max(0.0, min(float(duration) - 0.05, st))
+            en = max(st + 0.08, min(float(duration), en))
+        out.append({
+            "index": i,
+            "start": st,
+            "end": en,
+            "text": txt,
+            "animation": str(cue.get("animation") or "").strip().lower(),
+        })
+    return out
+
+
+def sfx_contract(payload, pacing_plan=None):
+    if not flag_enabled(payload.get("hook_sfx_enabled"), True):
+        return []
+    raw = payload.get("editor_sfx_plan") or []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for i, cue in enumerate(raw[:10]):
+        if not isinstance(cue, dict):
+            continue
+        try:
+            at = float(cue.get("at", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if pacing_plan:
+            at = map_source_time_to_output(at, pacing_plan)
+        desc = f"{cue.get('sound','')} {cue.get('purpose','')}".lower()
+        if "countdown" in desc or "three" in desc or "tick" in desc or "blip" in desc:
+            out.append({"kind":"countdown_ticks", "at":at, "index":i})
+        elif "chime" in desc or "ding" in desc or "reveal" in desc:
+            out.append({"kind":"soft_ding", "at":at, "index":i})
+        elif "whoosh" in desc:
+            out.append({"kind":"kid_whoosh", "at":at, "index":i})
+        elif "pop" in desc:
+            out.append({"kind":"soft_pop", "at":at, "index":i})
+        else:
+            out.append({"kind":"soft_pop", "at":at, "index":i})
+    return out
 
 
 def is_near_vertical_9_16(width, height):
@@ -1161,7 +1268,7 @@ def build_camera_filter(chain_in, chain_out, mode, timing):
             f"1+0.026*sin(PI*(t-{start:.3f})/{span:.3f}),1)"
         )
     return (
-        f"[{chain_in}]scale=w='{OUTPUT_W}*({scale})':h='{OUTPUT_H}*({scale})':eval=frame[camz];"
+        f"[{chain_in}]scale=w='{OUTPUT_W}*({scale})':h='{OUTPUT_H}*({scale})':eval=frame:flags=lanczos[camz];"
         f"[camz]crop={OUTPUT_W}:{OUTPUT_H}:(iw-{OUTPUT_W})/2:(ih-{OUTPUT_H})/2[{chain_out}];"
     )
 
@@ -1176,18 +1283,18 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
 
     if is_near_vertical_9_16(info["width"], info["height"]):
         parts.append(
-            f"[pacedv]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"[pacedv]scale=w={OUTPUT_W}:h={OUTPUT_H}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={OUTPUT_W}:{OUTPUT_H},setsar=1,{eq_base},"
             "unsharp=5:5:0.20:5:5:0.0[base];"
         )
     else:
         parts.append("[pacedv]split=2[bg][fg];")
         parts.append(
-            f"[bg]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"[bg]scale=w={OUTPUT_W}:h={OUTPUT_H}:force_original_aspect_ratio=increase:flags=lanczos,"
             f"crop={OUTPUT_W}:{OUTPUT_H},gblur=sigma=28,eq=brightness=-0.04:saturation=0.92[bg2];"
         )
         parts.append(
-            f"[fg]scale={OUTPUT_W-80}:{OUTPUT_H-142}:force_original_aspect_ratio=decrease,"
+            f"[fg]scale=w={OUTPUT_W-80}:h={OUTPUT_H-142}:force_original_aspect_ratio=decrease:flags=lanczos,"
             f"setsar=1,{eq_base}[fg2];"
         )
         parts.append("[bg2][fg2]overlay=(W-w)/2:(H-h)/2[base];")
@@ -1402,6 +1509,56 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
             f"x='{text_x}':y='{text_y}':alpha='{fade_alpha(text_start,en,TEXT_EXIT_FADE)}'"
         )
 
+    # Explicit Growth Engine overlay contract. These cues are authored by the
+    # script engine, so their wording/timing matches the lesson instead of being
+    # guessed again here. Use a top safe band for hook/countdown/answer and a
+    # lower safe band for reinforcement/celebration.
+    contract_cues = overlay_contract(payload, pacing_plan, duration)
+    if contract_cues:
+        for cue in contract_cues:
+            st, en, txt = cue["start"], cue["end"], cue["text"]
+            compact = re.sub(r"\s+", " ", txt).strip()
+            is_countdown = re.sub(r"\s+", " ", compact) in {"3 2 1", "3  2  1"} or compact.replace(" ", "") == "321"
+
+            if is_countdown and flag_enabled(payload.get("countdown_enabled"), True):
+                slot = max((en - st) / 3.0, 0.18)
+                for di, digit in enumerate(("3", "2", "1")):
+                    dst = st + di * slot
+                    den = min(en, dst + slot * 0.90)
+                    font_expr = kinetic_fontsize_expr(118, dst, dur=min(0.24, slot * 0.65), start_scale=0.62, overshoot=1.10)
+                    step(
+                        f"drawtext=fontfile={FONT}:text='{digit}':fontcolor=white:fontsize='{font_expr}':"
+                        f"borderw=5:bordercolor={theme['accent']}@0.98:"
+                        f"shadowx=3:shadowy=3:shadowcolor=black@0.45:"
+                        f"x='(w-text_w)/2':y={SAFE_TOP+120}:"
+                        f"alpha='{fade_alpha(dst,den,min(0.10,max((den-dst)/4,0.03)))}'"
+                    )
+                continue
+
+            # Cue-specific placement and size.
+            if st < 3.0:
+                y = SAFE_TOP + 95
+                base_font = 78 if len(compact) <= 16 else 66
+            elif st < 5.8:
+                y = SAFE_TOP + 105
+                base_font = 94 if len(compact) <= 10 else 76
+            elif st < 10.5:
+                y = OUTPUT_H - SAFE_BOTTOM - 175
+                base_font = 66 if len(compact) <= 18 else 58
+            else:
+                y = OUTPUT_H - SAFE_BOTTOM - 170
+                base_font = 72 if len(compact) <= 18 else 62
+
+            text_start = st
+            overshoot = 1.08 if "pop" in cue.get("animation","") or st < 6.0 else 1.04
+            font_expr = kinetic_fontsize_expr(base_font, text_start, dur=0.34, start_scale=0.78, overshoot=overshoot)
+            step(
+                f"drawtext=fontfile={FONT}:text='{esc(compact)}':fontcolor=white:fontsize='{font_expr}':"
+                f"borderw=4:bordercolor={theme['accent']}@0.96:"
+                f"shadowx=3:shadowy=3:shadowcolor=black@0.48:"
+                f"x='(w-text_w)/2':y={y}:alpha='{fade_alpha(st,en,0.12)}'"
+            )
+
     if edit_plan["use_progress"]:
         py = OUTPUT_H - SAFE_BOTTOM
         step(f"drawbox=x={SAFE_LEFT}:y={py}:w=780:h=8:color=black@0.16:t=fill")
@@ -1412,7 +1569,8 @@ def build_visual_filter(info, payload, duration, edit_plan, timing, texts, theme
     return "".join(parts)
 
 
-def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan, motion_graphics_plan):
+def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_windows, motion_plan, motion_graphics_plan, payload=None):
+    payload = payload or {}
     parts = []
     if info["has_audio"]:
         parts.append(build_paced_audio_prefix(pacing_plan))
@@ -1497,16 +1655,32 @@ def build_audio_filter(info, duration, edit_plan, timing, pacing_plan, speech_wi
         cue_labels.append(f"[{label}]")
 
     # The cue is synchronized to the first visible frame of the text motion.
-    if edit_plan.get("opening") != "none":
-        add_text_cue(motion_plan.get("opening_sfx"), timing["opening_start"], "open")
-    if edit_plan.get("show_keyword"):
-        add_text_cue(motion_plan.get("keyword_sfx"), timing["keyword_start"], "kw")
+    # When the explicit Growth overlay contract exists, its own SFX contract is
+    # authoritative and legacy inferred cues stay silent.
+    if not edit_plan.get("overlay_contract"):
+        if edit_plan.get("opening") != "none":
+            add_text_cue(motion_plan.get("opening_sfx"), timing["opening_start"], "open")
+        if edit_plan.get("show_keyword"):
+            add_text_cue(motion_plan.get("keyword_sfx"), timing["keyword_start"], "kw")
 
     # Motion graphics share the reveal sound whenever typography already owns it.
     # A separate tiny whoosh is allowed only when no keyword SFX is present.
     mg_sfx = (motion_graphics_plan or {}).get("sfx", "none")
-    if mg_sfx != "none" and motion_plan.get("keyword_sfx", "none") == "none":
+    if (not edit_plan.get("overlay_contract")) and mg_sfx != "none" and motion_plan.get("keyword_sfx", "none") == "none":
         add_text_cue("soft_whoosh", timing["reveal"], "mg")
+
+    # Explicit SFX contract from the script engine. Legacy typography SFX are
+    # suppressed when the overlay contract is active, so these become the single
+    # synchronized source of hook/countdown/reveal accents.
+    for scue in sfx_contract(payload, pacing_plan):
+        kind = scue["kind"]
+        at = scue["at"]
+        prefix = f"ct{scue['index']}"
+        if kind == "countdown_ticks":
+            for j in range(3):
+                add_text_cue("soft_pop", at + j * 0.48, f"{prefix}t{j}")
+        else:
+            add_text_cue(kind, at, prefix)
 
     if cue_labels:
         if len(cue_labels) == 1:
@@ -1826,7 +2000,7 @@ def mix_library_music_bed(video_in, track_path, output, duration, speech_windows
         "ffmpeg", "-y", "-i", str(video_in), "-i", str(track_path),
         "-filter_complex", fc,
         "-map", "0:v:0", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
     ]
     run(cmd)
@@ -1978,7 +2152,7 @@ def mix_original_music_bed(video_in, music_wav, output, duration, speech_windows
         "-filter_complex", fc,
         "-map", "0:v:0", "-map", "[aout]",
         "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-t", f"{float(duration):.3f}", "-movflags", "+faststart", str(output)
     ]
     run(cmd)
@@ -1996,7 +2170,7 @@ def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP
     # Always allow a final-frame hold, then trim to the exact target. This makes
     # both long and unexpectedly short brand clips robust without changing speed.
     vf = (
-        f"scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+        f"scale=w={OUTPUT_W}:h={OUTPUT_H}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={OUTPUT_W}:{OUTPUT_H},fps={OUTPUT_FPS},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration={effective_duration:.3f},"
         f"trim=duration={effective_duration:.3f},setpts=PTS-STARTPTS"
@@ -2029,9 +2203,9 @@ def normalize_intro(src, dest, target_duration=None, min_duration=MIN_BRAND_CLIP
         "-vf", vf,
         "-af", af,
         "-t", f"{effective_duration:.3f}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:v", "libx264", "-preset", OUTPUT_PRESET, "-crf", str(OUTPUT_CRF), "-profile:v", OUTPUT_PROFILE, "-level:v", OUTPUT_LEVEL, "-maxrate", OUTPUT_MAXRATE, "-bufsize", OUTPUT_BUFSIZE,
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(dest),
     ]
     run(cmd)
@@ -2052,9 +2226,9 @@ def prepend_intro(intro, body, output, xfade_dur=0.28):
         "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
         f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:v", "libx264", "-preset", OUTPUT_PRESET, "-crf", str(OUTPUT_CRF), "-profile:v", OUTPUT_PROFILE, "-level:v", OUTPUT_LEVEL, "-maxrate", OUTPUT_MAXRATE, "-bufsize", OUTPUT_BUFSIZE,
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(output),
     ]
     run(cmd)
@@ -2080,9 +2254,9 @@ def append_closure(body_with_intro, closure, output, xfade_dur=0.42):
         "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];"
         f"[a0][a1]acrossfade=d={xfade_dur:.3f}[aout]",
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:v", "libx264", "-preset", OUTPUT_PRESET, "-crf", str(OUTPUT_CRF), "-profile:v", OUTPUT_PROFILE, "-level:v", OUTPUT_LEVEL, "-maxrate", OUTPUT_MAXRATE, "-bufsize", OUTPUT_BUFSIZE,
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(output),
     ]
     run(cmd)
@@ -2116,16 +2290,16 @@ def edit_video(src, out, payload):
     )
     af = build_audio_filter(
         info, duration, edit_plan, timing, pacing_plan, speech_windows,
-        motion_plan, motion_graphics_plan
+        motion_plan, motion_graphics_plan, payload
     )
 
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
         "-filter_complex", vf + ";" + af,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:v", "libx264", "-preset", OUTPUT_PRESET, "-crf", str(OUTPUT_CRF), "-profile:v", OUTPUT_PROFILE, "-level:v", OUTPUT_LEVEL, "-maxrate", OUTPUT_MAXRATE, "-bufsize", OUTPUT_BUFSIZE,
         "-pix_fmt", "yuv420p", "-r", str(OUTPUT_FPS),
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        "-c:a", "aac", "-b:a", OUTPUT_AUDIO_BITRATE, "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", "-t", f"{duration:.3f}", str(out),
     ]
     run(cmd)
@@ -2155,6 +2329,7 @@ def edit_video(src, out, payload):
             "sfx_ducking": bool(motion_plan.get("opening_sfx") != "none" or motion_plan.get("keyword_sfx") != "none"),
             "text_sfx": {"opening": motion_plan.get("opening_sfx"), "keyword": motion_plan.get("keyword_sfx")},
             "motion_graphics_sfx": "none",
+            "contract_sfx": sfx_contract(payload, pacing_plan),
         },
     }
 
@@ -2269,6 +2444,24 @@ def main():
 
     meta = dict(payload)
     meta["editor_version"] = EDITOR_VERSION
+    meta["render_profile"] = {
+        "width": OUTPUT_W,
+        "height": OUTPUT_H,
+        "fps": OUTPUT_FPS,
+        "codec": "libx264",
+        "profile": OUTPUT_PROFILE,
+        "level": OUTPUT_LEVEL,
+        "crf": OUTPUT_CRF,
+        "preset": OUTPUT_PRESET,
+        "maxrate": OUTPUT_MAXRATE,
+        "bufsize": OUTPUT_BUFSIZE,
+        "upscale_filter": "lanczos",
+        "audio_codec": "aac",
+        "audio_bitrate": OUTPUT_AUDIO_BITRATE,
+    }
+    meta["overlay_contract_applied"] = bool(overlay_contract(payload, result.get("pacing_plan"), result.get("body_duration")))
+    meta["overlay_contract_cues"] = overlay_contract(payload, result.get("pacing_plan"), result.get("body_duration"))
+    meta["sfx_contract_cues"] = sfx_contract(payload, result.get("pacing_plan"))
     meta["short_playback_speed"] = SHORT_PLAYBACK_SPEED
     meta["pacing_mode"] = "silence_aware_variable_speed_target_0.90x"
     meta["approved_body_playback_speed"] = SHORT_PLAYBACK_SPEED
