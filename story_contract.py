@@ -1,3 +1,11 @@
+# KP Kids Content Bible v1.1 binding story contract
+KP_KIDS_BIBLE_VERSION = "1.1"
+BRAND_PROMISE = "Learning Through Little Adventures"
+SIGNATURE_FORMULA = ["Curiosity","Discovery","Participation","Learning","Small Reward","Adventure Continues"]
+CANON_WORLDS = ["KP Home","KP Garden","Bibo Lab","Lumi's Magic Forest","Dino Valley","Ocean World","Space Station"]
+AUDIO_RULE = "Dialogue and natural character voices first; light relevant SFX allowed; no background music, melody, singing or narrator unless explicitly requested as a song."
+VISUAL_RULE = "Teaching targets are physical objects integrated into the environment; no floating UI/subtitles/overlays; medium-wide default; exactly one instance of each active character."
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """KP Kids story contracts and deterministic beat-order repair.

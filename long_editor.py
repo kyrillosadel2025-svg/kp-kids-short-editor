@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KP Kids Long Video Editor V1.5 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Re-cuts vertical shorts into a large 4:3 focus window inside 1920x1080, with smooth character-to-lesson reframing and blurred side fill. - Preserves original speech/audio. - Adds one continuous real-music bed from the existing music/ library. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
+"""KP Kids Long Video Editor V1.5 Builds a native 16:9 YouTube long-form compilation from existing KP Kids RAW shorts. - Prefers archived Google Drive RAWs, falls back to original video URLs. - Re-cuts vertical shorts into a large 4:3 focus window inside 1920x1080, with smooth character-to-lesson reframing and blurred side fill. - Preserves original speech/audio. - KP Kids Bible v1.1: ordinary educational long videos preserve dialogue/natural SFX and add NO background music. - Uses gentle sidechain ducking so speech remains dominant. - Prepends/append the dedicated landscape intro/closure from Google Drive. - Writes metadata for the GitHub Action callback. """
 
 import argparse
 import base64
@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
-INTRO_DRIVE_FILE_ID = "13X7Mgifa-CLrcPg1Fz9Q5bejn8XsYlrH"
+INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
@@ -1099,9 +1099,15 @@ def main():
     body_no_music = work / "body_no_music.mp4"
     concat_files(normalized, body_no_music)
 
-    profile = choose_music_profile(payload, clips)
+    # KP Kids Content Bible v1.1: no background music for ordinary educational episodes.
+    music_enabled = str(payload.get("music_bed_enabled", False)).strip().lower() in {"1","true","yes","on"}
+    profile = choose_music_profile(payload, clips) if music_enabled else "none"
     body = work / "body_with_music.mp4"
-    music_result = mix_music(body_no_music, body, profile, str(payload.get("long_id") or payload.get("title") or "kp-kids-long"))
+    if music_enabled:
+        music_result = mix_music(body_no_music, body, profile, str(payload.get("long_id") or payload.get("title") or "kp-kids-long"))
+    else:
+        shutil.copy2(body_no_music, body)
+        music_result = {"source":"disabled_by_kp_kids_bible_v1.1","profile":"none"}
 
     final_parts = []
     brand_meta = {
