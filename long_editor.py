@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+import shutil
 
 EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
 INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
