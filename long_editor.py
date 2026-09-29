@@ -12,6 +12,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,10 +21,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-import shutil
 
 EDITOR_VERSION = "KP Kids Long Editor V1.6 - Smart Landscape Recut + 0.90x FINAL"
-INTRO_DRIVE_FILE_ID = "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf"
+INTRO_DRIVE_FILE_ID = "13X7Mgifa-CLrcPg1Fz9Q5bejn8XsYlrH"
 CLOSURE_DRIVE_FILE_ID = "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP"
 OUTPUT_W = 1920
 OUTPUT_H = 1080
@@ -242,6 +242,59 @@ def download_google_drive_file(file_id, dest, label="Google Drive media"):
                     time.sleep(2 + attempt * 3)
         # next endpoint
     raise RuntimeError(f"{label}: failed to download Google Drive file {file_id}: {last}")
+
+
+
+def download_brand_clip(file_id, dest, label, raw_proxy_base_url="", raw_proxy_token=""):
+    """Download a branded intro/closure robustly.
+
+    Order:
+      1) n8n authenticated Drive proxy when configured
+      2) direct/public Google Drive fallback
+
+    A proxy 404 must never abort the whole render before the Drive fallback is tried.
+    """
+    errors = []
+
+    if raw_proxy_base_url and raw_proxy_token:
+        try:
+            print(f"{label}: trying n8n Drive proxy (file_id={file_id})", flush=True)
+            download_via_n8n_proxy(
+                raw_proxy_base_url,
+                raw_proxy_token,
+                file_id,
+                dest,
+                label=f"{label} via n8n",
+            )
+            print(f"{label}: n8n proxy download OK", flush=True)
+            return "n8n_proxy"
+        except urllib.error.HTTPError as e:
+            msg = f"HTTP {e.code} {e.reason}"
+            errors.append(f"n8n_proxy={msg}")
+            print(
+                f"{label}: n8n proxy failed for file_id={file_id}: {msg}. "
+                "Trying direct Google Drive fallback...",
+                flush=True,
+            )
+        except Exception as e:
+            errors.append(f"n8n_proxy={type(e).__name__}: {e}")
+            print(
+                f"{label}: n8n proxy failed for file_id={file_id}: {type(e).__name__}: {e}. "
+                "Trying direct Google Drive fallback...",
+                flush=True,
+            )
+
+    try:
+        print(f"{label}: trying direct Google Drive (file_id={file_id})", flush=True)
+        download_google_drive_file(file_id, dest, label=f"{label} direct Drive")
+        print(f"{label}: direct Google Drive download OK", flush=True)
+        return "google_drive_direct"
+    except Exception as e:
+        errors.append(f"google_drive={type(e).__name__}: {e}")
+        raise RuntimeError(
+            f"{label}: all download methods failed for file_id={file_id}. "
+            + " | ".join(errors)
+        ) from e
 
 
 def sanitize_text(s):
@@ -1024,8 +1077,8 @@ def main():
 
     include_intro = payload_bool(payload, "include_intro", False)
     include_closure = payload_bool(payload, "include_closure", False)
-    intro_drive_file_id = str(payload.get("intro_drive_file_id") or "1stHOtc3CGBDU0gmr5tr0Q1t4gntpVvdf").strip()
-    closure_drive_file_id = str(payload.get("closure_drive_file_id") or "1_T_4-TtHeXCtniOkDlxct8dG1QI_uSnP").strip()
+    intro_drive_file_id = str(payload.get("intro_drive_file_id") or INTRO_DRIVE_FILE_ID).strip()
+    closure_drive_file_id = str(payload.get("closure_drive_file_id") or CLOSURE_DRIVE_FILE_ID).strip()
 
     print(
         f"Branding choice: intro={include_intro} closure={include_closure} "
@@ -1118,22 +1171,23 @@ def main():
         "closure_drive_file_id": closure_drive_file_id if include_closure else "",
         "intro_source_dimensions": "",
         "closure_source_dimensions": "",
+        "intro_download_source": "",
+        "closure_download_source": "",
     }
 
     if include_intro:
         intro_raw = work / "intro_raw.mp4"
         intro_norm = work / "intro_norm.mp4"
-        if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(
-                raw_proxy_base_url, raw_proxy_token, intro_drive_file_id,
-                intro_raw, label="Dedicated LANDSCAPE intro via n8n"
-            )
-        else:
-            download_google_drive_file(
-                intro_drive_file_id, intro_raw, label="Dedicated LANDSCAPE intro"
-            )
+        intro_source = download_brand_clip(
+            intro_drive_file_id,
+            intro_raw,
+            "Dedicated LANDSCAPE intro",
+            raw_proxy_base_url,
+            raw_proxy_token,
+        )
         iw, ih = assert_landscape_brand_clip(intro_raw, "Long intro")
         brand_meta["intro_source_dimensions"] = f"{iw}x{ih}"
+        brand_meta["intro_download_source"] = intro_source
         normalize_brand_clip(intro_raw, intro_norm)
         final_parts.append(intro_norm)
 
@@ -1142,17 +1196,16 @@ def main():
     if include_closure:
         closure_raw = work / "closure_raw.mp4"
         closure_norm = work / "closure_norm.mp4"
-        if raw_proxy_base_url and raw_proxy_token:
-            download_via_n8n_proxy(
-                raw_proxy_base_url, raw_proxy_token, closure_drive_file_id,
-                closure_raw, label="Dedicated LANDSCAPE closure via n8n"
-            )
-        else:
-            download_google_drive_file(
-                closure_drive_file_id, closure_raw, label="Dedicated LANDSCAPE closure"
-            )
+        closure_source = download_brand_clip(
+            closure_drive_file_id,
+            closure_raw,
+            "Dedicated LANDSCAPE closure",
+            raw_proxy_base_url,
+            raw_proxy_token,
+        )
         cw, ch = assert_landscape_brand_clip(closure_raw, "Long closure")
         brand_meta["closure_source_dimensions"] = f"{cw}x{ch}"
+        brand_meta["closure_download_source"] = closure_source
         normalize_brand_clip(closure_raw, closure_norm)
         final_parts.append(closure_norm)
 
