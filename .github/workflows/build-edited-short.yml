@@ -34,6 +34,7 @@ jobs:
       - name: Render edited Short
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          PYTHONUNBUFFERED: "1"
         run: |
           set -o pipefail
           python3 short_editor.py \
@@ -84,6 +85,17 @@ jobs:
           urllib.request.urlopen(req, timeout=60).read()
           PY
 
+      - name: Upload short render diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-kids-edited-short-failure-log
+          path: |
+            short_render.log
+            edit_result.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Send failure callback
         if: failure()
         env:
@@ -102,7 +114,16 @@ jobs:
           detail = ""
           try:
               lines = open("short_render.log", encoding="utf-8", errors="replace").read().splitlines()
-              detail = "\n".join(lines[-20:])[-1800:]
+              tail = lines[-50:]
+              interesting = [
+                  x for x in tail
+                  if ("RuntimeError:" in x or "Error:" in x or "failed:" in x.lower()
+                      or "HTTPError" in x or "urllib.error" in x or "404" in x
+                      or "Traceback" in x or "proxy" in x.lower()
+                      or "drive" in x.lower() or "download" in x.lower())
+              ]
+              chosen = interesting[-14:] if interesting else tail[-24:]
+              detail = "\n".join(chosen)[-1800:]
           except Exception:
               pass
           msg = "GitHub short editor failed"

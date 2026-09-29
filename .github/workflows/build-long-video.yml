@@ -33,10 +33,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: Show safe render inputs
+        env:
+          PAYLOAD_B64: ${{ inputs.payload_b64 }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64
+          p = json.loads(base64.b64decode(os.environ["PAYLOAD_B64"]).decode("utf-8"))
+          print("KP KIDS LONG RENDER INPUTS")
+          print("include_intro =", bool(p.get("include_intro")))
+          print("include_closure =", bool(p.get("include_closure")))
+          print("intro_drive_file_id =", p.get("intro_drive_file_id") or "")
+          print("closure_drive_file_id =", p.get("closure_drive_file_id") or "")
+          print("raw_proxy_base_url =", p.get("raw_proxy_base_url") or "")
+          print("clip_count =", len(p.get("clips") or []))
+          for i, c in enumerate((p.get("clips") or [])[:30], 1):
+              print(
+                  f"clip[{i}] short_id={c.get('short_id','')} "
+                  f"drive_file_id={c.get('drive_file_id','')} "
+                  f"has_video_url={bool(c.get('video_url') or c.get('videoUrl'))}"
+              )
+          PY
+
       - name: Build landscape long video
         id: render
         env:
           PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          PYTHONUNBUFFERED: "1"
         run: |
           set -o pipefail
           python3 long_editor.py \
@@ -95,6 +118,17 @@ jobs:
               print(r.status, r.read()[:500])
           PY
 
+      - name: Upload long render diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-kids-long-video-failure-log
+          path: |
+            long_render.log
+            long_result_meta.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Callback n8n - failure
         if: failure()
         env:
@@ -119,10 +153,12 @@ jobs:
                   interesting = [
                       x for x in tail
                       if ('RuntimeError:' in x or 'Error:' in x or 'failed:' in x.lower()
-                          or 'NOT landscape' in x or 'Need at least' in x
-                          or 'downloaded file is too small' in x)
+                          or 'HTTPError' in x or 'urllib.error' in x or '404' in x
+                          or 'Traceback' in x or 'proxy' in x.lower() or 'drive' in x.lower()
+                          or 'download' in x.lower() or 'NOT landscape' in x
+                          or 'Need at least' in x or 'downloaded file is too small' in x)
                   ]
-                  chosen = interesting[-8:] if interesting else tail[-18:]
+                  chosen = interesting[-14:] if interesting else tail[-24:]
                   detail = '\n'.join(chosen).strip()[-1800:]
           except Exception as e:
               detail = f'Could not read render log: {e}'
